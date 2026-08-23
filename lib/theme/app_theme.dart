@@ -42,12 +42,14 @@ Widget appBorderedField({
   bool obscure = false,
   int maxLines = 1,
   TextInputType? keyboardType,
+  bool enabled = true,
 }) {
   return TextField(
     controller: controller,
     obscureText: obscure,
     maxLines: maxLines,
     keyboardType: keyboardType,
+    enabled: enabled,
     style: appMono(size: 13),
     decoration: InputDecoration(
       hintText: hint,

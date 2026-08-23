@@ -175,3 +175,47 @@ icon and `_clone()` always re-cloned, even for a repo already present locally.
 **Not yet re-verified on-device** (this fix landed after the last device install) —
 next device test should re-visit the repo list after a clone to confirm the row
 switches to "Already cloned" and reopens without re-downloading.
+
+### 2026-08-23 — Frontend redesign (bottom-tab UI, onboarding, GitHub flat state machine)
+
+**Driven by:** user-supplied design mockup (`fronten/Git Agent App Design/git_agent_app.dc.html`),
+formalized in `docs/superpowers/specs/2026-08-23-frontend-redesign-design.md` and executed via
+`docs/superpowers/plans/2026-08-23-frontend-redesign.md` (7 tasks, subagent-driven).
+
+**What changed:**
+- New `lib/theme/app_theme.dart` — black/white visual system (`AppColors`, `appHeading`/
+  `appBody`/`appMono` via `google_fonts`' Sora/Inter/JetBrains Mono, reusable bordered-field/
+  button/chat-bubble widgets) applied app-wide via `MaterialApp.theme`.
+- New `lib/ui/onboarding_screen.dart` — one-time 3-step wizard (PAT → repos preview → LLM
+  engine), gated by a persisted `onboarded` SharedPreferences flag read in `main.dart`.
+- New `lib/ui/root_screen.dart` — 3-tab bottom nav (`Chat` / `GitHub` / `Config`) replacing the
+  old single-button `HomeScreen`, which is now deleted.
+- New `lib/ui/general_chat_screen.dart` — a stub assistant tab (static message + canned reply,
+  no LLM call), per the approved design spec exception.
+- `lib/ui/repo_list_screen.dart`, `lib/ui/file_browser_screen.dart`, and `lib/ui/chat_screen.dart`
+  deleted; their logic (clone/already-cloned detection, file-tree browsing, generation, slash
+  commands, persona/skill/guardrails composition, on-device load timer, save-path resolution,
+  push) is folded verbatim into `lib/ui/github_tab_screen.dart` as one flat state machine
+  (`_subScreen`: `repos | files | chat`) with `PopScope`-driven back navigation instead of
+  `Navigator.push`.
+- `lib/ui/settings_screen.dart` deleted; replaced by `lib/ui/config_screen.dart` — same fields
+  restyled, plus two inert LangChain/LangGraph toggle switches (approved exception to
+  decision.md #12 — no backend, no persistence).
+- New dependency: `google_fonts: ^6.2.1`.
+- No backend logic changed — `InstructionLibrary`, `AgentConfig`, `EngineSettings`,
+  `SecretStore`, `RepoGitService`, `buildStructuringPrompt`, `parseSlashCommand` are all byte-
+  for-byte unchanged; the 47 existing tests kept passing throughout.
+
+**Final-review fix pass** (`61d0885`) addressed 5 real cross-task integration gaps a per-task
+reviewer couldn't see: chat send/browse buttons weren't disabled while busy (could fire
+overlapping generations); the GitHub tab's repo list had no way to retry after a PAT was added
+post-launch (permanently stuck error since `IndexedStack` preserves tab state); Android hardware
+back exited the whole app instead of navigating the flat state machine (fixed with `PopScope`);
+`ConfigScreen` leaked 5 `TextEditingController`s; the skill/persona entry dialog's Name field
+lost its edit-lock during the port. All confirmed fixed on re-review.
+
+**Environment note for future subagent-driven work:** subagent implementers' own `git commit`
+calls did not persist to this repo throughout this plan's execution — every commit was made by
+the controller after independently verifying each implementer's uncommitted diff matched its
+brief. If this recurs, instruct implementers not to commit at all and have the controller commit
+directly, as was done here from Task 3 onward.

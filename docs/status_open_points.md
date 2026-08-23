@@ -15,10 +15,17 @@
   LLM was configured, so clone/structure/push were not exercised yet.
 - 2026-08-23: Device testing surfaced a real bug (repo list didn't detect
   already-cloned repos) — fixed same day, see `implementation.md`.
-- 2026-08-23: Skills/personas/guardrails moved from "deferred" (below) to
-  **actively spec'd** — design approved, spec at
-  `docs/superpowers/specs/2026-08-23-skills-personas-guardrails-design.md`.
-  Implementation plan not yet written.
+- 2026-08-23: Skills/personas/guardrails: **implemented** — spec at
+  `docs/superpowers/specs/2026-08-23-skills-personas-guardrails-design.md`, plan at
+  `docs/superpowers/plans/2026-08-23-skills-personas-guardrails.md` (8 tasks, all
+  reviewed clean, final-review fix pass applied). Skills/Personas library UI, default
+  persona, guardrails, slash commands, and the on-device load elapsed-time indicator
+  are all live in the app.
+- 2026-08-23: Frontend redesign: **implemented** — bottom-tab nav (Chat/GitHub/Config),
+  onboarding wizard, black/white visual system, GitHub tab rebuilt as a flat state
+  machine. Spec at `docs/superpowers/specs/2026-08-23-frontend-redesign-design.md`,
+  plan at `docs/superpowers/plans/2026-08-23-frontend-redesign.md` (7 tasks, final-review
+  fix pass applied, ready to merge). See `implementation.md`'s Change log for details.
 
 ## Open points (deferred, not blocking v1)
 
