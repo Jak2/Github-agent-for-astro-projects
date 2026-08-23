@@ -20,7 +20,10 @@ class _RootScreenState extends State<RootScreen> {
   @override
   Widget build(BuildContext context) {
     final tabs = [
-      const GeneralChatScreen(),
+      GeneralChatScreen(
+        secretStore: widget.secretStore,
+        onSwitchTab: (index) => setState(() => _tabIndex = index),
+      ),
       GithubTabScreen(secretStore: widget.secretStore),
       ConfigScreen(secretStore: widget.secretStore),
     ];

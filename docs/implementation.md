@@ -219,3 +219,106 @@ calls did not persist to this repo throughout this plan's execution — every co
 the controller after independently verifying each implementer's uncommitted diff matched its
 brief. If this recurs, instruct implementers not to commit at all and have the controller commit
 directly, as was done here from Task 3 onward.
+
+### 2026-08-24 — responsive-layout crash and status-bar overlap (post-launch device test)
+
+**Reported by:** user, after installing the redesigned frontend — "the ui layout is going
+out of the screen."
+
+**Root cause (crash):** `appPrimaryButton`/`appSecondaryButton` (`lib/theme/app_theme.dart`)
+both wrap their child in `SizedBox(width: double.infinity)`, which fills whatever width its
+parent hands it. `config_screen.dart` and `onboarding_screen.dart` each placed the on-device
+"Choose file" `appSecondaryButton` as a direct child of a `Row` with no `Expanded` — a `Row`
+gives unconstrained (infinite) width to non-flex children, so the infinite-width `SizedBox`
+threw a `BoxConstraints` layout assertion mid-frame and froze rendering. This only reproduced
+when `EngineSettings.choice == EngineChoice.onDevice` (the "Choose file" row is conditionally
+built only for that engine choice), which happened to be the saved setting on the test device —
+so Config appeared to silently go blank on every launch, with no crash visible in `adb logcat`
+(the frozen frame's cached pixels stayed on screen). Root-caused by attaching a live debug
+session (`flutter attach`) to catch the actual `RenderFlex`/`SizedBox` exception, since a
+plain `adb install` + `logcat` didn't surface it.
+
+**Fix:** wrapped both "Choose file" button call sites in a fixed-width `SizedBox(width: 120)`
+instead of leaving them unbounded in the `Row`.
+
+**Root cause (status-bar overlap):** `ConfigScreen`, `GithubTabScreen`, and
+`GeneralChatScreen`'s `Scaffold` bodies weren't wrapped in `SafeArea` — only
+`OnboardingScreen` had one. Header text rendered under the status bar/notch on those three
+tabs.
+
+**Fix:** added `SafeArea(bottom: false)` to all three (`bottom: false` since
+`RootScreen`'s `bottomNavigationBar` already reserves that space).
+
+**Also:** disabled Impeller via an `AndroidManifest.xml` meta-data entry
+(`io.flutter.embedding.android.EnableImpeller = false`) while investigating — ruled out as
+the cause (the crash reproduced identically with Impeller off), but left disabled since this
+test device's Mali GPU logged `mali_gralloc` format warnings at every launch and Skia is the
+safer default there.
+
+**Verified:** `flutter analyze` (0 errors), `flutter test` (47/47), and on-device — Config
+tab renders fully with the on-device engine selected, headers clear the status bar on all
+three tabs.
+
+### 2026-08-24 — Models section in Config (load / offload / uninstall)
+
+**Requested by:** user — "after choosing on-device, I want to see if the model is active."
+
+**What changed:**
+- `lib/engine/on_device_llama_engine.dart` — added `isLoaded` getter and public `load()`/
+  `unload()` methods, so the model's lifecycle can be driven explicitly instead of only
+  lazily loading inside `generate()`.
+- `lib/engine/on_device_engine_registry.dart` (new) — a single app-wide
+  `OnDeviceLlamaEngine` instance keyed by model path. `engine_factory.dart`'s
+  `buildEngine()` now routes on-device requests through this registry instead of
+  constructing a fresh instance per call site, so Config's Load/Offload controls and the
+  chat screen's actual generation observe and act on the same loaded state.
+- `lib/ui/config_screen.dart` — new "Models" section under the on-device engine choice:
+  shows the configured model's filename, a status dot (green "Active — loaded in memory" /
+  grey "Not loaded"), and Load / Offload / Uninstall buttons. Uninstall confirms first,
+  then unloads, deletes the file from disk, and clears the saved path.
+
+**Verified:** `flutter analyze` (0 errors), `flutter test` (47/47), and on-device (empty
+state confirmed rendering correctly; full load/offload/uninstall flow needs a real `.gguf`
+on a test device to exercise end to end — not yet done).
+
+### 2026-08-24 — Repo-aware General Chat
+
+**Requested by:** user — "I want the app to answer normal questions about the repos, and
+select the repo from the chat itself and traverse and work on the file I want."
+
+**What changed (6 tasks, `docs/superpowers/plans/2026-08-24-repo-aware-chat.md`):**
+- `lib/files/file_tree_text.dart` (new) — `renderFileTreeAsText(FileTreeNode)`, a pure
+  function rendering a file tree as indented text for the LLM's context.
+- `lib/chat/pending_file_handoff.dart` (new) — `PendingFileHandoff`, a one-shot app-wide
+  singleton carrying a "please open this file in the structuring chat" request from
+  General Chat to the GitHub tab.
+- `lib/github/repo_browser_service.dart` (new) — `loadReposWithCloneStatus`, extracted
+  from `GithubTabScreen`'s previously-inline repo-listing logic so both screens share one
+  implementation; `GithubTabScreen`'s clone-on-tap flow itself was left untouched.
+- `lib/ui/general_chat_screen.dart` (rewrite) — General Chat is now a real, LLM-backed
+  assistant: "Browse repos" and "Browse files" post tappable lists into the chat thread;
+  tapping a file offers "Ask about this file" (reads it into the conversation's context,
+  stays in Chat) or "Structure this file" (hands off to the GitHub tab via
+  `PendingFileHandoff` + a tab-switch callback). Before a file is opened, the LLM sees
+  only the repo's file/folder tree — never file contents.
+- `lib/ui/root_screen.dart` / `lib/ui/github_tab_screen.dart` — small wiring: `RootScreen`
+  passes a tab-switch callback into `GeneralChatScreen`; `GithubTabScreen` picks up a
+  pending handoff via `didUpdateWidget` (the correct hook since `IndexedStack` keeps its
+  State alive across tab switches — `initState` only fires once at app start).
+
+**Final-review fix pass** (`3a89651`) addressed 2 real cross-task integration bugs a
+per-task reviewer couldn't see: General Chat's LLM engine was cached from `initState` and
+never refreshed, so configuring an LLM after the initial "not configured" message left
+Chat permanently stuck until an app restart (`GithubTabScreen` didn't have this bug since
+it re-resolves settings on every file open) — fixed by resolving the engine fresh on every
+send. And both screens' "already cloned" status was a stale snapshot from list-load time;
+cloning a repo from one screen and then tapping it in the other's stale list fell through
+to the clone path, which deletes the existing directory before re-cloning — fixed by
+re-checking the directory's real existence on disk at tap time in both screens, before
+deciding whether to clone. Both confirmed fixed on re-review.
+
+**Verified:** `flutter analyze` (0 errors), `flutter test` (57/57 — 47 prior + 10 new: 4
+for `file_tree_text`, 3 for `pending_file_handoff`, 3 for `repo_browser_service`). Manual
+on-device smoke test (browse repos → select → browse files → ask about a file → structure
+a file and confirm the handoff lands in the GitHub tab) not yet run — needs a real GitHub
+PAT and LLM configured on a test device.

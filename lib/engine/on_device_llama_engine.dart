@@ -10,12 +10,20 @@ class OnDeviceLlamaEngine implements LlmEngine {
 
   OnDeviceLlamaEngine({required this.modelPath});
 
+  bool get isLoaded => _parent != null;
+
   Future<LlamaParent> _ensureLoaded() async {
     if (_parent != null) return _parent!;
     final parent = LlamaParent(
       LlamaLoad(
         path: modelPath,
-        modelParams: ModelParams(),
+        // nGpuLayers defaults to 99 (offload almost everything to GPU), but
+        // this app's llama.cpp is built from source without a mobile GPU
+        // backend (no Vulkan/CUDA compute path linked in) — leaving the
+        // default causes a native SIGSEGV inside the model-load isolate the
+        // first time it tries to hand a layer to a GPU backend that isn't
+        // there. Force CPU-only inference.
+        modelParams: ModelParams()..nGpuLayers = 0,
         contextParams: ContextParams(),
         samplingParams: SamplerParams(),
       ),
@@ -23,6 +31,17 @@ class OnDeviceLlamaEngine implements LlmEngine {
     await parent.init();
     _parent = parent;
     return parent;
+  }
+
+  /// Explicitly loads the model without generating anything, so the UI can
+  /// show a "Load" action independent of sending a prompt.
+  Future<void> load() => _ensureLoaded();
+
+  /// Frees the loaded model's isolate/memory. Safe to call when not loaded.
+  Future<void> unload() async {
+    final parent = _parent;
+    _parent = null;
+    await parent?.dispose();
   }
 
   @override

@@ -67,3 +67,50 @@ the user during brainstorming:
   `EngineSettings`, unambiguous slash-command grammar, bundled starter personas).
 
 Full design: `docs/superpowers/specs/2026-08-23-skills-personas-guardrails-design.md`.
+
+## 2026-08-24 (frontend redesign + repo-aware chat)
+
+User supplied a design mockup (`fronten/Git Agent App Design/git_agent_app.dc.html`)
+and asked to fully incorporate it: black/white visual system, bottom-tab nav
+(Chat/GitHub/Config) replacing the old single-button Home screen, a one-time
+onboarding wizard, and a new General Chat tab. Brainstormed three scope
+decisions before writing the spec: General Chat ships as an intentional stub
+(no LLM), LangChain/LangGraph toggles are included but inert (an approved
+exception to decision.md #12), and the GitHub tab is rebuilt as a literal
+flat state machine matching the mockup's own code rather than restyling the
+existing `Navigator.push` chain. Full design:
+`docs/superpowers/specs/2026-08-23-frontend-redesign-design.md`; implemented
+via `docs/superpowers/plans/2026-08-23-frontend-redesign.md` (7 tasks, final
+review found real cross-tab integration gaps a per-task reviewer couldn't
+see — busy-guard, PAT-retry, hardware back, controller leak — all fixed).
+
+Post-launch device testing surfaced two more issues, fixed same day:
+- A real crash (not just cosmetic): `appSecondaryButton`'s
+  `SizedBox(width: double.infinity)` used as a direct `Row` child with no
+  `Expanded` (the on-device "Choose file" button) threw a `BoxConstraints`
+  layout assertion and froze the frame — reproduced only when
+  `EngineSettings.choice == EngineChoice.onDevice`, which is exactly what
+  the test device had saved, making Config look like it silently went
+  blank. Root-caused via `flutter attach`, fixed by giving that button a
+  fixed-width wrapper.
+- Screen headers rendering under the status bar/notch on three tabs — only
+  `OnboardingScreen` had `SafeArea`; added it to the other three.
+
+User then asked for a Models section in Config (load/offload/uninstall an
+on-device model, see if it's active) — added `OnDeviceEngineRegistry` as a
+shared app-wide engine instance so Config's controls and the chat screen's
+actual generation observe the same loaded state, plus `isLoaded`/`load()`/
+`unload()` on `OnDeviceLlamaEngine`.
+
+Finally, user asked for General Chat to become repo-aware: real LLM Q&A,
+conversational (tap-based) repo/file selection, and answering questions
+about repos. Brainstormed the scope down from an initial "feed the whole
+repo" ask (real cost/context-window risk) to: tree-only context by default,
+file content read on-demand only when explicitly requested via "Ask about
+this file," and a "Structure this file" action that hands off to the
+GitHub tab's *existing* structuring chat rather than duplicating it. GitHub
+tab stays completely unchanged; General Chat becomes a second entry point
+into the same repo/file data via new shared, non-UI helpers
+(`repo_browser_service.dart`, `file_tree_text.dart`,
+`pending_file_handoff.dart`). Full design:
+`docs/superpowers/specs/2026-08-24-repo-aware-chat-design.md`.

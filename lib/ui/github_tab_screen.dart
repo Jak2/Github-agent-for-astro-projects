@@ -2,10 +2,10 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../chat/pending_file_handoff.dart';
 import '../chat/save_path_resolver.dart';
 import '../chat/slash_command.dart';
 import '../chat/structuring_prompt.dart';
@@ -15,8 +15,8 @@ import '../engine/on_device_llama_engine.dart';
 import '../files/file_tree.dart';
 import '../git/repo_git_service.dart';
 import '../git/repo_paths.dart';
-import '../github/github_api.dart';
 import '../github/github_repo.dart';
+import '../github/repo_browser_service.dart';
 import '../instructions/instruction_library.dart';
 import '../secrets/secret_store.dart';
 import '../settings/agent_config.dart';
@@ -80,6 +80,7 @@ class _GithubTabScreenState extends State<GithubTabScreen> {
   void initState() {
     super.initState();
     _loadRepos();
+    _consumePendingHandoffIfAny();
   }
 
   @override
@@ -91,26 +92,17 @@ class _GithubTabScreenState extends State<GithubTabScreen> {
   }
 
   Future<void> _loadRepos() async {
-    final token = await widget.secretStore.read(secretKeyGithubPat);
-    if (token == null || token.isEmpty) {
-      setState(() => _reposError = 'Add a GitHub Personal Access Token in Config first.');
-      return;
-    }
+    final reposRoot = await getApplicationDocumentsDirectory();
     try {
-      final api = GithubApi(client: Dio(), token: token);
-      final repos = await api.listRepos();
-      final reposRoot = await getApplicationDocumentsDirectory();
-      final alreadyCloned = <String>{};
-      for (final repo in repos) {
-        final dir = await repoDirectory(reposRoot, repo.fullName);
-        if (await dir.exists()) alreadyCloned.add(repo.fullName);
-      }
+      final result = await loadReposWithCloneStatus(secretStore: widget.secretStore, reposRoot: reposRoot);
       if (!mounted) return;
       setState(() {
-        _repos = repos;
+        _repos = result.repos;
         _reposRoot = reposRoot;
-        _alreadyClonedFullNames = alreadyCloned;
+        _alreadyClonedFullNames = result.alreadyClonedFullNames;
       });
+    } on NoGithubTokenException {
+      if (mounted) setState(() => _reposError = 'Add a GitHub Personal Access Token in Config first.');
     } catch (e) {
       if (mounted) setState(() => _reposError = 'Failed to load repos: $e');
     }
@@ -129,9 +121,9 @@ class _GithubTabScreenState extends State<GithubTabScreen> {
 
   Future<void> _tapRepo(GithubRepo repo) async {
     if (_cloningFullName != null) return;
-    final reposRoot = _reposRoot;
-    if (_alreadyClonedFullNames.contains(repo.fullName) && reposRoot != null) {
-      final dir = await repoDirectory(reposRoot, repo.fullName);
+    final reposRoot = _reposRoot ?? await getApplicationDocumentsDirectory();
+    final dir = await repoDirectory(reposRoot, repo.fullName);
+    if (await dir.exists()) {
       await _openRepo(repo, dir);
       return;
     }
@@ -174,8 +166,25 @@ class _GithubTabScreenState extends State<GithubTabScreen> {
       return;
     }
     if (!mounted) return;
+    _startStructuringChat(
+      repo: _activeRepo!,
+      repoDir: dir,
+      relativePath: node.relativePath,
+      content: content,
+    );
+    await _initChat();
+  }
+
+  void _startStructuringChat({
+    required GithubRepo repo,
+    required Directory repoDir,
+    required String relativePath,
+    required String content,
+  }) {
     setState(() {
-      _activeFilePath = node.relativePath;
+      _activeRepo = repo;
+      _activeRepoDir = repoDir;
+      _activeFilePath = relativePath;
       _activeFileContent = content;
       _chatMessages.clear();
       _refinements.clear();
@@ -186,7 +195,24 @@ class _GithubTabScreenState extends State<GithubTabScreen> {
       _onDeviceModelLoaded = false;
       _subScreen = _SubScreen.chat;
     });
-    await _initChat();
+  }
+
+  void _consumePendingHandoffIfAny() {
+    final pending = PendingFileHandoff.instance.consume();
+    if (pending == null) return;
+    _startStructuringChat(
+      repo: pending.repo,
+      repoDir: pending.repoDir,
+      relativePath: pending.relativePath,
+      content: pending.content,
+    );
+    _initChat();
+  }
+
+  @override
+  void didUpdateWidget(covariant GithubTabScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _consumePendingHandoffIfAny();
   }
 
   void _goBackToRepos() => setState(() => _subScreen = _SubScreen.repos);
@@ -660,11 +686,14 @@ class _GithubTabScreenState extends State<GithubTabScreen> {
         }
       },
       child: Scaffold(
-        body: switch (_subScreen) {
-          _SubScreen.repos => _reposBody(),
-          _SubScreen.files => _filesBody(),
-          _SubScreen.chat => _chatBody(),
-        },
+        body: SafeArea(
+          bottom: false,
+          child: switch (_subScreen) {
+            _SubScreen.repos => _reposBody(),
+            _SubScreen.files => _filesBody(),
+            _SubScreen.chat => _chatBody(),
+          },
+        ),
       ),
     );
   }

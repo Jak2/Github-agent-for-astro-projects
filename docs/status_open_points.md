@@ -26,6 +26,24 @@
   machine. Spec at `docs/superpowers/specs/2026-08-23-frontend-redesign-design.md`,
   plan at `docs/superpowers/plans/2026-08-23-frontend-redesign.md` (7 tasks, final-review
   fix pass applied, ready to merge). See `implementation.md`'s Change log for details.
+- 2026-08-24: Post-launch fixes: **implemented** — a real crash in the on-device
+  "Choose file" button (infinite-width `SizedBox` inside an unbounded `Row`) and
+  missing `SafeArea` on three tab screens (headers rendered under the status bar).
+  Both fixed and verified on-device; see `implementation.md`'s Change log.
+- 2026-08-24: Config's Models section (load/offload/uninstall on-device model,
+  active-status display): **implemented** — `OnDeviceEngineRegistry` shares one
+  engine instance app-wide so Config's controls and chat generation agree on
+  loaded state. See `implementation.md`'s Change log.
+- 2026-08-24: Repo-aware General Chat: **implemented** — General Chat now has
+  a real LLM engine, tap-based repo/file selection (cloning if needed),
+  tree-only repo context by default, on-demand file reads via "Ask about
+  this file," and a "Structure this file" handoff into the GitHub tab's
+  existing structuring chat. Spec at
+  `docs/superpowers/specs/2026-08-24-repo-aware-chat-design.md`, plan at
+  `docs/superpowers/plans/2026-08-24-repo-aware-chat.md` (6 tasks, final-review
+  fix pass applied for a stale-cached-engine bug and a cross-screen
+  destructive-reclone race, both confirmed fixed). See `implementation.md`'s
+  Change log for details.
 
 ## Open points (deferred, not blocking v1)
 

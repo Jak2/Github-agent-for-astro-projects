@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../engine/on_device_engine_registry.dart';
 import '../instructions/instruction_library.dart';
 import '../secrets/secret_store.dart';
 import '../settings/agent_config.dart';
@@ -36,6 +37,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
   final _guardrailsController = TextEditingController();
   bool _langchainEnabled = false;
   bool _langgraphEnabled = false;
+  bool _modelBusy = false;
 
   @override
   void initState() {
@@ -238,6 +240,146 @@ class _ConfigScreenState extends State<ConfigScreen> {
     }
   }
 
+  Future<void> _loadModel() async {
+    final path = _settings.onDeviceModelPath;
+    if (path.isEmpty) return;
+    setState(() => _modelBusy = true);
+    try {
+      await OnDeviceEngineRegistry.instance.forPath(path).load();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load model: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _modelBusy = false);
+    }
+  }
+
+  Future<void> _offloadModel() async {
+    setState(() => _modelBusy = true);
+    try {
+      await OnDeviceEngineRegistry.instance.unload();
+    } finally {
+      if (mounted) setState(() => _modelBusy = false);
+    }
+  }
+
+  Future<void> _confirmUninstallModel() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.bg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: AppColors.fg, width: 3),
+        ),
+        title: Text('Uninstall model?', style: appHeading(size: 16, weight: FontWeight.w700)),
+        content: Text(
+          'This deletes the model file from your device. You can re-add it later by choosing the file again.',
+          style: appBody(size: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text('Cancel', style: appBody(size: 13, weight: FontWeight.w600)),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: Text('Uninstall', style: appBody(size: 13, weight: FontWeight.w600)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await _uninstallModel();
+  }
+
+  Future<void> _uninstallModel() async {
+    final path = _settings.onDeviceModelPath;
+    if (path.isEmpty) return;
+    setState(() => _modelBusy = true);
+    try {
+      await OnDeviceEngineRegistry.instance.unload();
+      final file = File(path);
+      if (await file.exists()) await file.delete();
+      final prefs = await SharedPreferences.getInstance();
+      final updated = _settings.copyWith(onDeviceModelPath: '');
+      await updated.save(prefs);
+      if (mounted) setState(() => _settings = updated);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to uninstall model: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _modelBusy = false);
+    }
+  }
+
+  Widget _modelsSection() {
+    final path = _settings.onDeviceModelPath;
+    if (path.isEmpty) {
+      return Text(
+        'No model added yet — pick one above under "On-device (.gguf)".',
+        style: appBody(size: 12.5, color: AppColors.muted),
+      );
+    }
+    final loaded = OnDeviceEngineRegistry.instance.isLoadedFor(path);
+    final name = path.split('/').last;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      decoration: BoxDecoration(
+        border: Border.all(color: AppColors.fg, width: 2),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(name, style: appBody(size: 13.5, weight: FontWeight.w600), overflow: TextOverflow.ellipsis),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: BoxDecoration(
+                  color: loaded ? Colors.greenAccent : AppColors.muted,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                loaded ? 'Active — loaded in memory' : 'Not loaded',
+                style: appMono(size: 11, color: loaded ? Colors.greenAccent : AppColors.muted),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: appSecondaryButton(
+                  label: loaded ? 'Loaded' : (_modelBusy ? 'Loading…' : 'Load'),
+                  onPressed: (loaded || _modelBusy) ? null : _loadModel,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: appSecondaryButton(
+                  label: 'Offload',
+                  onPressed: (!loaded || _modelBusy) ? null : _offloadModel,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          appSecondaryButton(
+            label: 'Uninstall',
+            onPressed: _modelBusy ? null : _confirmUninstallModel,
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _importStructureMd() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.any);
     final path = result?.files.single.path;
@@ -307,7 +449,9 @@ class _ConfigScreenState extends State<ConfigScreen> {
     }
 
     return Scaffold(
-      body: Column(
+      body: SafeArea(
+        bottom: false,
+        child: Column(
         children: [
           SizedBox(
             height: 60,
@@ -372,10 +516,18 @@ class _ConfigScreenState extends State<ConfigScreen> {
                           ),
                         ),
                         const SizedBox(width: 8),
-                        appSecondaryButton(label: 'Choose file', onPressed: _pickOnDeviceModel),
+                        SizedBox(
+                          width: 120,
+                          child: appSecondaryButton(label: 'Choose file', onPressed: _pickOnDeviceModel),
+                        ),
                       ],
                     ),
                   ),
+                const SizedBox(height: 22),
+
+                Text('Models', style: appHeading(size: 14, weight: FontWeight.w700)),
+                const SizedBox(height: 8),
+                _modelsSection(),
                 const SizedBox(height: 22),
 
                 Text('Agent framework', style: appHeading(size: 14, weight: FontWeight.w700)),
@@ -471,6 +623,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
             ),
           ),
         ],
+        ),
       ),
     );
   }

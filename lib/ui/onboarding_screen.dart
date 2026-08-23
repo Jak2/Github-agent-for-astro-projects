@@ -213,7 +213,10 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  appSecondaryButton(label: 'Choose file', onPressed: _pickOnDeviceModel),
+                  SizedBox(
+                    width: 120,
+                    child: appSecondaryButton(label: 'Choose file', onPressed: _pickOnDeviceModel),
+                  ),
                 ],
               ),
             ),

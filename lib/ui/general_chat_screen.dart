@@ -1,40 +1,79 @@
 // lib/ui/general_chat_screen.dart
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../chat/pending_file_handoff.dart';
+import '../engine/engine_factory.dart';
+import '../engine/llm_engine.dart';
+import '../files/file_tree.dart';
+import '../files/file_tree_text.dart';
+import '../git/repo_git_service.dart';
+import '../git/repo_paths.dart';
+import '../github/github_repo.dart';
+import '../github/repo_browser_service.dart';
+import '../secrets/secret_store.dart';
+import '../settings/engine_settings.dart';
 import '../theme/app_theme.dart';
 
-class _Message {
+sealed class _ChatItem {
+  const _ChatItem();
+}
+
+class _TextItem extends _ChatItem {
   final String text;
   final bool fromUser;
-  const _Message(this.text, {required this.fromUser});
+  const _TextItem(this.text, {required this.fromUser});
+}
+
+class _RepoListItem extends _ChatItem {
+  final List<GithubRepo> repos;
+  final Set<String> alreadyClonedFullNames;
+  _RepoListItem({required this.repos, required this.alreadyClonedFullNames});
+}
+
+class _FileListItem extends _ChatItem {
+  final FileTreeNode root;
+  _FileListItem(this.root);
+}
+
+class _FileActionsItem extends _ChatItem {
+  final String relativePath;
+  _FileActionsItem(this.relativePath);
 }
 
 class GeneralChatScreen extends StatefulWidget {
-  const GeneralChatScreen({super.key});
+  final SecretStore secretStore;
+  final void Function(int tabIndex) onSwitchTab;
+
+  const GeneralChatScreen({super.key, required this.secretStore, required this.onSwitchTab});
 
   @override
   State<GeneralChatScreen> createState() => _GeneralChatScreenState();
 }
 
 class _GeneralChatScreenState extends State<GeneralChatScreen> {
-  final List<_Message> _messages = [
-    const _Message(
-      'Ask me anything about your repos, or open a file from the GitHub tab to structure it.',
+  final List<_ChatItem> _items = [
+    _TextItem(
+      'Ask me anything about your repos. Tap the repo icon to browse and select one.',
       fromUser: false,
     ),
   ];
   final _inputController = TextEditingController();
+  bool _busy = false;
 
-  void _send() {
-    final text = _inputController.text.trim();
-    if (text.isEmpty) return;
-    _inputController.clear();
-    setState(() {
-      _messages.add(_Message(text, fromUser: true));
-      _messages.add(const _Message(
-        'Open a file from the GitHub tab to generate structured Markdown from it.',
-        fromUser: false,
-      ));
-    });
+  GithubRepo? _activeRepo;
+  Directory? _activeRepoDir;
+  FileTreeNode? _fileTree;
+  String? _openFilePath;
+  String? _openFileContent;
+  String? _cloningFullName;
+
+  @override
+  void initState() {
+    super.initState();
+    _initEngine();
   }
 
   @override
@@ -43,47 +82,359 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     super.dispose();
   }
 
+  Future<LlmEngine?> _resolveEngine() async {
+    final prefs = await SharedPreferences.getInstance();
+    var settings = await EngineSettings.load(prefs);
+    final apiKey = await widget.secretStore.read(secretKeyCloudApiKey) ?? '';
+    settings = settings.copyWith(cloudApiKey: apiKey);
+    return buildEngine(settings);
+  }
+
+  Future<void> _initEngine() async {
+    final engine = await _resolveEngine();
+    if (!mounted) return;
+    if (engine == null) {
+      setState(() {
+        _items.add(const _TextItem(
+          'No LLM configured. Go to Config and set up a Cloud API or On-device engine first.',
+          fromUser: false,
+        ));
+      });
+    }
+  }
+
+  Future<void> _browseRepos() async {
+    setState(() => _busy = true);
+    try {
+      final reposRoot = await getApplicationDocumentsDirectory();
+      final result = await loadReposWithCloneStatus(secretStore: widget.secretStore, reposRoot: reposRoot);
+      if (!mounted) return;
+      setState(() {
+        _items.add(_RepoListItem(repos: result.repos, alreadyClonedFullNames: result.alreadyClonedFullNames));
+      });
+    } on NoGithubTokenException {
+      if (mounted) {
+        setState(() => _items.add(const _TextItem(
+              'Add a GitHub Personal Access Token in Config first.',
+              fromUser: false,
+            )));
+      }
+    } catch (e) {
+      if (mounted) setState(() => _items.add(_TextItem('Failed to load repos: $e', fromUser: false)));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _selectRepo(GithubRepo repo, bool alreadyCloned) async {
+    setState(() => _cloningFullName = alreadyCloned ? null : repo.fullName);
+    try {
+      final reposRoot = await getApplicationDocumentsDirectory();
+      Directory dir = await repoDirectory(reposRoot, repo.fullName);
+      final actuallyExists = await dir.exists();
+      if (!actuallyExists) {
+        final token = await widget.secretStore.read(secretKeyGithubPat);
+        if (token == null) {
+          if (mounted) {
+            setState(() => _items.add(const _TextItem(
+                  'GitHub Personal Access Token missing. Add one in Config.',
+                  fromUser: false,
+                )));
+          }
+          return;
+        }
+        final service = RepoGitService(reposRoot: reposRoot);
+        dir = await service.cloneRepo(repo: repo, token: token);
+      }
+      final tree = await buildFileTree(dir);
+      if (!mounted) return;
+      setState(() {
+        _activeRepo = repo;
+        _activeRepoDir = dir;
+        _fileTree = tree;
+        _openFilePath = null;
+        _openFileContent = null;
+        _items.add(_TextItem('Repo selected: ${repo.fullName}', fromUser: false));
+      });
+    } catch (e) {
+      if (mounted) setState(() => _items.add(_TextItem('Failed to open repo: $e', fromUser: false)));
+    } finally {
+      if (mounted) setState(() => _cloningFullName = null);
+    }
+  }
+
+  void _browseFiles() {
+    final tree = _fileTree;
+    if (tree == null) return;
+    setState(() => _items.add(_FileListItem(tree)));
+  }
+
+  void _tapFile(String relativePath) {
+    setState(() => _items.add(_FileActionsItem(relativePath)));
+  }
+
+  Future<void> _askAboutFile(String relativePath) async {
+    final dir = _activeRepoDir;
+    if (dir == null) return;
+    try {
+      final content = await File('${dir.path}/$relativePath').readAsString();
+      if (!mounted) return;
+      setState(() {
+        _openFilePath = relativePath;
+        _openFileContent = content;
+        _items.add(_TextItem('Opened $relativePath — ask me anything about it.', fromUser: false));
+      });
+    } catch (e) {
+      if (mounted) setState(() => _items.add(_TextItem('Could not read file: $e', fromUser: false)));
+    }
+  }
+
+  Future<void> _structureFile(String relativePath) async {
+    final repo = _activeRepo;
+    final dir = _activeRepoDir;
+    if (repo == null || dir == null) return;
+    try {
+      final content = await File('${dir.path}/$relativePath').readAsString();
+      PendingFileHandoff.instance.request(
+        repo: repo,
+        repoDir: dir,
+        relativePath: relativePath,
+        content: content,
+      );
+      widget.onSwitchTab(1);
+    } catch (e) {
+      if (mounted) setState(() => _items.add(_TextItem('Could not read file: $e', fromUser: false)));
+    }
+  }
+
+  String _buildPrompt() {
+    final buffer = StringBuffer();
+    final repo = _activeRepo;
+    final tree = _fileTree;
+    if (repo != null && tree != null) {
+      buffer
+        ..writeln('You are a helpful assistant answering questions about a GitHub repository.')
+        ..writeln('Repository: ${repo.fullName}')
+        ..writeln('File and folder structure:')
+        ..writeln(renderFileTreeAsText(tree))
+        ..writeln();
+    } else {
+      buffer
+        ..writeln(
+            'You are a helpful assistant. If the user wants to browse their GitHub repos, they can use the repo icon above.')
+        ..writeln();
+    }
+    if (_openFilePath != null && _openFileContent != null) {
+      buffer
+        ..writeln('The user has opened this file for discussion:')
+        ..writeln(_openFilePath)
+        ..writeln('---')
+        ..writeln(_openFileContent)
+        ..writeln('---')
+        ..writeln();
+    }
+    buffer.writeln('Conversation so far:');
+    for (final item in _items) {
+      if (item is _TextItem) {
+        buffer.writeln('${item.fromUser ? "User" : "Assistant"}: ${item.text}');
+      }
+    }
+    return buffer.toString();
+  }
+
+  Future<void> _send() async {
+    final text = _inputController.text.trim();
+    if (text.isEmpty) return;
+    _inputController.clear();
+    setState(() => _items.add(_TextItem(text, fromUser: true)));
+
+    final engine = await _resolveEngine();
+    if (!mounted) return;
+    if (engine == null) {
+      setState(() => _items.add(const _TextItem(
+            'No LLM configured. Go to Config and set up a Cloud API or On-device engine first.',
+            fromUser: false,
+          )));
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final result = await engine.generate(_buildPrompt());
+      if (mounted) setState(() => _items.add(_TextItem(result, fromUser: false)));
+    } catch (e) {
+      if (mounted) setState(() => _items.add(_TextItem('Generation failed: $e', fromUser: false)));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  List<Widget> _fileTiles(FileTreeNode node, int depth) {
+    final tiles = <Widget>[];
+    for (final child in node.children) {
+      tiles.add(InkWell(
+        onTap: child.isDirectory ? null : () => _tapFile(child.relativePath),
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(12 + depth * 16.0, 8, 12, 8),
+          child: Row(
+            children: [
+              Icon(
+                child.isDirectory ? Icons.folder_outlined : Icons.description_outlined,
+                size: 15,
+                color: child.isDirectory ? AppColors.fg : AppColors.muted,
+              ),
+              const SizedBox(width: 8),
+              Text(child.name, style: appMono(size: 12)),
+            ],
+          ),
+        ),
+      ));
+      if (child.isDirectory) tiles.addAll(_fileTiles(child, depth + 1));
+    }
+    return tiles;
+  }
+
+  Widget _buildItem(_ChatItem item) {
+    return switch (item) {
+      _TextItem() => appChatBubble(text: item.text, fromUser: item.fromUser),
+      _RepoListItem() => Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          decoration: BoxDecoration(
+            border: Border.all(color: AppColors.fg, width: 2),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            children: [
+              for (final r in item.repos)
+                InkWell(
+                  onTap: _cloningFullName != null
+                      ? null
+                      : () => _selectRepo(r, item.alreadyClonedFullNames.contains(r.fullName)),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                    child: Row(
+                      children: [
+                        if (_cloningFullName == r.fullName)
+                          const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: AppColors.fg),
+                          )
+                        else
+                          Icon(
+                            item.alreadyClonedFullNames.contains(r.fullName) ? Icons.folder_open : Icons.download,
+                            size: 16,
+                            color: AppColors.fg,
+                          ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(r.fullName, style: appMono(size: 12.5), overflow: TextOverflow.ellipsis),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      _FileListItem() => Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          decoration: BoxDecoration(
+            border: Border.all(color: AppColors.fg, width: 2),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(children: _fileTiles(item.root, 0)),
+        ),
+      _FileActionsItem() => Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            border: Border.all(color: AppColors.fg, width: 2),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(item.relativePath, style: appMono(size: 12.5, weight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: appSecondaryButton(
+                      label: 'Ask about this file',
+                      onPressed: () => _askAboutFile(item.relativePath),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: appSecondaryButton(
+                      label: 'Structure this file',
+                      onPressed: () => _structureFile(item.relativePath),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+    };
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Column(
-        children: [
-          SizedBox(
-            height: 60,
-            child: Row(
-              children: [
-                const SizedBox(width: 16),
-                Text('Assistant', style: appHeading(size: 17, weight: FontWeight.w700)),
-              ],
-            ),
-          ),
-          const Divider(color: AppColors.fg, thickness: 2, height: 2),
-          Expanded(
-            child: ListView.builder(
-              padding: const EdgeInsets.all(16),
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                final m = _messages[index];
-                return appChatBubble(text: m.text, fromUser: m.fromUser);
-              },
-            ),
-          ),
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: appBorderedField(
-                    controller: _inputController,
-                    hint: 'Ask the assistant...',
+      body: SafeArea(
+        bottom: false,
+        child: Column(
+          children: [
+            SizedBox(
+              height: 60,
+              child: Row(
+                children: [
+                  const SizedBox(width: 16),
+                  Expanded(child: Text('Assistant', style: appHeading(size: 17, weight: FontWeight.w700))),
+                  appIconCircleButton(icon: Icons.hub_outlined, onPressed: _busy ? null : _browseRepos),
+                  const SizedBox(width: 8),
+                  appIconCircleButton(
+                    icon: Icons.folder_outlined,
+                    onPressed: (_busy || _activeRepo == null) ? null : _browseFiles,
                   ),
-                ),
-                const SizedBox(width: 8),
-                appIconCircleButton(icon: Icons.arrow_forward, onPressed: _send, filled: true),
-              ],
+                  const SizedBox(width: 16),
+                ],
+              ),
             ),
-          ),
-        ],
+            const Divider(color: AppColors.fg, thickness: 2, height: 2),
+            Expanded(
+              child: ListView.builder(
+                padding: const EdgeInsets.all(16),
+                itemCount: _items.length + (_busy ? 1 : 0),
+                itemBuilder: (context, index) {
+                  if (index == _items.length) {
+                    return const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 10),
+                      child: LinearProgressIndicator(color: AppColors.fg, backgroundColor: AppColors.divider),
+                    );
+                  }
+                  return _buildItem(_items[index]);
+                },
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: appBorderedField(
+                      controller: _inputController,
+                      hint: 'Ask about your repos...',
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  appIconCircleButton(icon: Icons.arrow_forward, onPressed: _busy ? null : _send, filled: true),
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

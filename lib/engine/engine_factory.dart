@@ -2,7 +2,7 @@ import 'package:dio/dio.dart';
 import '../settings/engine_settings.dart';
 import 'cloud_api_engine.dart';
 import 'llm_engine.dart';
-import 'on_device_llama_engine.dart';
+import 'on_device_engine_registry.dart';
 
 /// Returns null when [settings] doesn't have enough configured to build a
 /// real engine. Callers must treat null as "block and ask the user to
@@ -23,6 +23,6 @@ LlmEngine? buildEngine(EngineSettings settings) {
       );
     case EngineChoice.onDevice:
       if (settings.onDeviceModelPath.isEmpty) return null;
-      return OnDeviceLlamaEngine(modelPath: settings.onDeviceModelPath);
+      return OnDeviceEngineRegistry.instance.forPath(settings.onDeviceModelPath);
   }
 }
