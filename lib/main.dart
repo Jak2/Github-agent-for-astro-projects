@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'instructions/instruction_library.dart';
 import 'instructions/starter_personas.dart';
 import 'secrets/secret_store.dart';
+import 'theme/app_theme.dart';
 import 'ui/repo_list_screen.dart';
 import 'ui/settings_screen.dart';
 
@@ -28,6 +29,7 @@ class GitAgentApp extends StatelessWidget {
     final secretStore = SecureSecretStore();
     return MaterialApp(
       title: 'git_agent_app',
+      theme: appThemeData(),
       home: HomeScreen(secretStore: secretStore),
     );
   }
