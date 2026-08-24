@@ -1,4 +1,5 @@
 // lib/ui/general_chat_screen.dart
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../chat/pending_file_handoff.dart';
 import '../engine/engine_factory.dart';
+import '../engine/generation_event.dart';
 import '../engine/llm_engine.dart';
 import '../files/file_tree.dart';
 import '../files/file_tree_text.dart';
@@ -22,9 +24,10 @@ sealed class _ChatItem {
 }
 
 class _TextItem extends _ChatItem {
-  final String text;
+  /// Mutable so a streaming reply can grow one bubble in place.
+  String text;
   final bool fromUser;
-  const _TextItem(this.text, {required this.fromUser});
+  _TextItem(this.text, {required this.fromUser});
 }
 
 class _RepoListItem extends _ChatItem {
@@ -61,7 +64,11 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     ),
   ];
   final _inputController = TextEditingController();
+  final _scrollController = ScrollController();
   bool _busy = false;
+  String _statusLine = '';
+  StreamSubscription<GenerationEvent>? _genSub;
+  _TextItem? _streamingReply;
 
   GithubRepo? _activeRepo;
   Directory? _activeRepoDir;
@@ -78,8 +85,21 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
 
   @override
   void dispose() {
+    _genSub?.cancel();
+    _scrollController.dispose();
     _inputController.dispose();
     super.dispose();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      _scrollController.animateTo(
+        _scrollController.position.maxScrollExtent,
+        duration: const Duration(milliseconds: 200),
+        curve: Curves.easeOut,
+      );
+    });
   }
 
   Future<LlmEngine?> _resolveEngine() async {
@@ -95,7 +115,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     if (!mounted) return;
     if (engine == null) {
       setState(() {
-        _items.add(const _TextItem(
+        _items.add(_TextItem(
           'No LLM configured. Go to Config and set up a Cloud API or On-device engine first.',
           fromUser: false,
         ));
@@ -114,7 +134,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
       });
     } on NoGithubTokenException {
       if (mounted) {
-        setState(() => _items.add(const _TextItem(
+        setState(() => _items.add(_TextItem(
               'Add a GitHub Personal Access Token in Config first.',
               fromUser: false,
             )));
@@ -136,7 +156,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         final token = await widget.secretStore.read(secretKeyGithubPat);
         if (token == null) {
           if (mounted) {
-            setState(() => _items.add(const _TextItem(
+            setState(() => _items.add(_TextItem(
                   'GitHub Personal Access Token missing. Add one in Config.',
                   fromUser: false,
                 )));
@@ -251,20 +271,80 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     final engine = await _resolveEngine();
     if (!mounted) return;
     if (engine == null) {
-      setState(() => _items.add(const _TextItem(
+      setState(() => _items.add(_TextItem(
             'No LLM configured. Go to Config and set up a Cloud API or On-device engine first.',
             fromUser: false,
           )));
       return;
     }
-    setState(() => _busy = true);
-    try {
-      final result = await engine.generate(_buildPrompt());
-      if (mounted) setState(() => _items.add(_TextItem(result, fromUser: false)));
-    } catch (e) {
-      if (mounted) setState(() => _items.add(_TextItem('Generation failed: $e', fromUser: false)));
-    } finally {
-      if (mounted) setState(() => _busy = false);
+    // Built before the empty reply bubble is added so it isn't in the transcript.
+    final prompt = _buildPrompt();
+
+    // One growing bubble the tokens stream into.
+    final reply = _TextItem('', fromUser: false);
+    setState(() {
+      _busy = true;
+      _statusLine = 'starting…';
+      _streamingReply = reply;
+      _items.add(reply);
+    });
+
+    final buffer = StringBuffer();
+    _genSub = engine.generateStream(prompt).listen(
+      (event) {
+        if (!mounted) return;
+        setState(() {
+          switch (event) {
+            case GenerationStatus(:final stage):
+              _statusLine = stage;
+            case GenerationToken(:final text):
+              buffer.write(text);
+              reply.text = buffer.toString();
+            case GenerationDone(:final fullText):
+              reply.text = fullText.isEmpty ? buffer.toString() : fullText;
+              _statusLine = '';
+            case GenerationError(:final message):
+              reply.text = 'Generation failed: $message';
+              _statusLine = '';
+          }
+        });
+        _scrollToBottom();
+      },
+      onError: (Object e) {
+        if (!mounted) return;
+        setState(() {
+          reply.text = 'Generation failed: $e';
+          _statusLine = '';
+          _busy = false;
+        });
+        _scrollToBottom();
+      },
+      onDone: () {
+        if (!mounted) return;
+        setState(() {
+          _busy = false;
+          _statusLine = '';
+          if (reply.text.isEmpty) {
+            // Never leave a blank bubble — that is the original bug's symptom.
+            reply.text = 'The model returned no output.';
+          }
+        });
+        _scrollToBottom();
+      },
+      cancelOnError: true,
+    );
+  }
+
+  void _stopGeneration() {
+    _genSub?.cancel();
+    _genSub = null;
+    final reply = _streamingReply;
+    if (mounted) {
+      setState(() {
+        _busy = false;
+        _statusLine = 'stopped';
+        if (reply != null && reply.text.isEmpty) reply.text = 'Stopped before any output.';
+      });
     }
   }
 
@@ -405,6 +485,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
             const Divider(color: AppColors.fg, thickness: 2, height: 2),
             Expanded(
               child: ListView.builder(
+                controller: _scrollController,
                 padding: const EdgeInsets.all(16),
                 itemCount: _items.length + (_busy ? 1 : 0),
                 itemBuilder: (context, index) {
@@ -418,6 +499,22 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
                 },
               ),
             ),
+            if (_busy)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        _statusLine.isEmpty ? 'working…' : _statusLine,
+                        style: appMono(size: 11, color: AppColors.muted),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    appIconCircleButton(icon: Icons.stop, onPressed: _stopGeneration),
+                  ],
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.all(12),
               child: Row(
