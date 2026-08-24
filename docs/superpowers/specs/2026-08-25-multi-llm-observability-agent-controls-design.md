@@ -234,11 +234,48 @@ Bounded to a sane range, with `HapticFeedback.selectionClick()` on each press
 **Each card gains a real description** of what the setting does and what
 changing it costs — the user's complaint is that the cards convey nothing.
 
-**Honesty requirement.** These controls persist real configuration, but until a
-framework backend exists they do not change generation behaviour. The UI must
-say so plainly rather than implying an effect it does not have. Fabricating the
-appearance of function would violate the project's first principle
-(`design_theory.md`, Part 1).
+### Real backends — what actually exists (verified 2026-08-25)
+
+The user asked for real frameworks, not inert toggles. Investigation of what is
+genuinely available for Dart:
+
+**LangChain — real, runs in-app.** `langchain` 0.8.1 (MIT, verified publisher,
+301 likes) is a mature Dart port. Resolves cleanly against this project's
+Dart `^3.13.0` SDK — dry-run adds 8 packages with no conflicts. Provides real
+chains, agents, tools, and memory.
+
+- **Cloud:** `langchain_openai` accepts any OpenAI-compatible endpoint, which
+  matches the app's existing Cloud API config (endpoint + key + model).
+- **On-device:** no prebuilt integration exists for `llama_cpp_dart`, and
+  `langchain_ollama` needs an Ollama server the phone does not have. However,
+  `langchain_core`'s `SimpleChatModel` requires exactly one method:
+
+  ```dart
+  Future<String> callInternal(List<ChatMessage> messages, {Options? options});
+  ```
+
+  `OnDeviceLlamaEngine.generate()` already has that shape, so a small adapter
+  makes the on-device model a first-class LangChain model with no server.
+  **Caveat:** chains work on-device; ReAct agents needing reliable structured
+  tool-calls will not work with a 0.5–1.5B model.
+
+**LangGraph — no Dart engine exists.** The only package, `langgraph_client`
+0.2.2, is an HTTP client for a LangGraph *server*; it does not execute graphs
+on device, and it was last published ~16 months ago. Running "real LangGraph"
+would require hosting a Python LangGraph server.
+
+**Decision (user):** build **in-app graph orchestration** in Dart — real graph
+execution with nodes, edges, cycles, and shared state — and **name it honestly
+as "Graph orchestration", not "LangGraph"**, because it is not LangGraph. This
+is the same engine Phase 5 needs, so the two share one implementation. No
+server, no stale dependency, works offline.
+
+### Honesty requirement
+
+Each card states plainly what its backend actually is: LangChain names the real
+library and version; Graph orchestration states that it is this app's own graph
+engine, not LangGraph, and why. Implying a capability the code does not have
+would violate the project's first principle (`design_theory.md`, Part 1).
 
 **Open item:** the user recalls a prior discussion fixing the loop levels for
 each framework. That discussion is being located in `docs/`; if it exists, its
@@ -267,6 +304,9 @@ everything one more time.
 - **Cloud only.** Refused on the on-device engine, with an in-UI explanation:
   0.5–1.5B phone models cannot plan reliably and would burn minutes producing
   incoherent steps.
+- **Built on the same graph engine as Phase 4's "Graph orchestration"** — one
+  implementation, not two. Nodes are steps, edges are transitions, the shared
+  state carries the running compact summary.
 - **Hard cap of 5 steps.** Not advisory — the loop stops.
 - **A hard token budget** that aborts mid-run when exceeded.
 - **Confirmation before any multi-step run begins.**
