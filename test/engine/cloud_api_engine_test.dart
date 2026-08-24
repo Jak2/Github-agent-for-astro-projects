@@ -2,6 +2,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:git_agent_app/engine/cloud_api_engine.dart';
+import 'package:git_agent_app/engine/generation_event.dart';
 
 void main() {
   test('generate posts prompt and returns content field', () async {
@@ -40,6 +41,26 @@ void main() {
     );
 
     expect(() => engine.generate('hello'), throwsA(isA<DioException>()));
+  });
+
+  test('generateStream emits status, token, then done', () async {
+    final dio = Dio();
+    dio.httpClientAdapter = _FakeAdapter((options) {
+      return ResponseBody.fromString('{"content": "hello"}', 200,
+          headers: {'content-type': ['application/json']});
+    });
+    final engine = CloudApiEngine(
+      client: dio,
+      apiKey: 'test-key',
+      endpoint: 'https://example.com/generate',
+    );
+
+    final events = await engine.generateStream('hi').toList();
+
+    expect(events.whereType<GenerationStatus>(), isNotEmpty);
+    expect(events.whereType<GenerationToken>().single.text, 'hello');
+    expect(events.whereType<GenerationDone>().single.fullText, 'hello');
+    expect(events.whereType<GenerationError>(), isEmpty);
   });
 }
 

@@ -17,14 +17,25 @@ class CloudApiEngine implements LlmEngine {
     this.extraHeaders = const {},
   });
 
-  // ponytail: temporary stub, Task 4 of the generation-observability plan
-  // replaces this with the real event-emitting implementation.
   @override
-  Stream<GenerationEvent> generateStream(String prompt) =>
-      throw UnimplementedError();
+  Future<String> generate(String prompt) => bufferStream(generateStream(prompt));
 
+  /// No SSE here — the cloud endpoint returns one response, which is wrapped in
+  /// the event API so the UI has a single code path for both engines.
   @override
-  Future<String> generate(String prompt) async {
+  Stream<GenerationEvent> generateStream(String prompt) async* {
+    yield const GenerationStatus('contacting API…');
+    // ponytail: failures propagate as stream errors rather than a
+    // GenerationError event, so callers keep the original DioException (with
+    // its request context) instead of a type-erased Exception. Nothing is
+    // swallowed — the UI's onError renders it.
+    final text = await _requestCompletion(prompt);
+    yield const GenerationStatus('response received');
+    yield GenerationToken(text);
+    yield GenerationDone(text);
+  }
+
+  Future<String> _requestCompletion(String prompt) async {
     final response = await client.post(
       endpoint,
       options: Options(headers: {'Authorization': 'Bearer $apiKey', ...extraHeaders}),
