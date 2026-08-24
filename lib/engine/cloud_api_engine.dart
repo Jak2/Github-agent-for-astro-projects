@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'generation_event.dart';
 import 'llm_engine.dart';
 
 class CloudApiEngine implements LlmEngine {
@@ -15,6 +16,12 @@ class CloudApiEngine implements LlmEngine {
     this.model = '',
     this.extraHeaders = const {},
   });
+
+  // ponytail: temporary stub, Task 4 of the generation-observability plan
+  // replaces this with the real event-emitting implementation.
+  @override
+  Stream<GenerationEvent> generateStream(String prompt) =>
+      throw UnimplementedError();
 
   @override
   Future<String> generate(String prompt) async {

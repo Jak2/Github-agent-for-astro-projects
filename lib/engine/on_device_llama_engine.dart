@@ -1,4 +1,5 @@
 import 'package:llama_cpp_dart/llama_cpp_dart.dart';
+import 'generation_event.dart';
 import 'llm_engine.dart';
 
 /// On-device engine backed by llama_cpp_dart's isolate-based LlamaParent.
@@ -43,6 +44,12 @@ class OnDeviceLlamaEngine implements LlmEngine {
     _parent = null;
     await parent?.dispose();
   }
+
+  // ponytail: temporary stub, Task 3 of the generation-observability plan
+  // replaces this with the real event-emitting implementation.
+  @override
+  Stream<GenerationEvent> generateStream(String prompt) =>
+      throw UnimplementedError();
 
   @override
   Future<String> generate(String prompt) async {
