@@ -1,4 +1,5 @@
 // lib/ui/config_screen.dart
+import 'dart:async';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -38,6 +39,8 @@ class _ConfigScreenState extends State<ConfigScreen> {
   bool _langchainEnabled = false;
   bool _langgraphEnabled = false;
   bool _modelBusy = false;
+  int _modelBusyElapsedSeconds = 0;
+  Timer? _modelBusyTimer;
 
   @override
   void initState() {
@@ -243,14 +246,46 @@ class _ConfigScreenState extends State<ConfigScreen> {
   Future<void> _loadModel() async {
     final path = _settings.onDeviceModelPath;
     if (path.isEmpty) return;
+
+    // Fail fast on an obviously bad file instead of waiting out the full
+    // native load timeout for something that can never succeed.
+    final file = File(path);
+    if (!await file.exists()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('Model file no longer exists at this path.')));
+      }
+      return;
+    }
+    final size = await file.length();
+    if (size < 1024 * 1024) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Model file looks truncated/corrupt (${size}B) — re-download or re-pick it.')));
+      }
+      return;
+    }
+
     setState(() => _modelBusy = true);
+    _modelBusyElapsedSeconds = 0;
+    _modelBusyTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted) setState(() => _modelBusyElapsedSeconds++);
+    });
     try {
       await OnDeviceEngineRegistry.instance.forPath(path).load();
+    } on TimeoutException {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                'Model load timed out after ${_modelBusyElapsedSeconds}s — likely stuck, not just slow. Try a smaller model or restart the app.')));
+      }
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to load model: $e')));
       }
     } finally {
+      _modelBusyTimer?.cancel();
+      _modelBusyTimer = null;
       if (mounted) setState(() => _modelBusy = false);
     }
   }
@@ -357,7 +392,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
             children: [
               Expanded(
                 child: appSecondaryButton(
-                  label: loaded ? 'Loaded' : (_modelBusy ? 'Loading…' : 'Load'),
+                  label: loaded ? 'Loaded' : (_modelBusy ? 'Loading… ${_modelBusyElapsedSeconds}s' : 'Load'),
                   onPressed: (loaded || _modelBusy) ? null : _loadModel,
                 ),
               ),
@@ -636,6 +671,7 @@ class _ConfigScreenState extends State<ConfigScreen> {
     _modelController.dispose();
     _headersController.dispose();
     _guardrailsController.dispose();
+    _modelBusyTimer?.cancel();
     super.dispose();
   }
 }
