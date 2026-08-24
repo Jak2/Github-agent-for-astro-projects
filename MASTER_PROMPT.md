@@ -89,6 +89,9 @@ explicitly out of scope for v1).
 
 - `docs/discussion.md` — how the idea was scoped down to v1
 - `docs/decision.md` — every architecture decision and why
+- `docs/design_theory.md` — principles behind the decisions, the black/white visual
+  system, and native-dependency rules. Read before UI work or before bumping
+  the pinned `llama.cpp` commit.
 - `docs/implementation.md` — what was built, task by task, plus bugs caught
 - `docs/status_open_points.md` — current status, deferred features, open risks
 - `docs/on_device_load_hang_rootcause.md` — the on-device load investigation:

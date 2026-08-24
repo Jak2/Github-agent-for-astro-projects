@@ -91,6 +91,8 @@ commit+push of one file — see `docs/status_open_points.md` for the full deferr
 - `docs/discussion.md` — how the idea was scoped down to v1
 - `docs/decision.md` — every architecture decision and why, including two git-library
   swaps discovered mid-implementation
+- `docs/design_theory.md` — the principles behind those decisions, plus the visual
+  system (colour, type, components) and native-dependency discipline
 - `docs/implementation.md` — what was actually built, task by task, plus real bugs
   caught along the way
 - `docs/status_open_points.md` — current status, deferred features, open risks
