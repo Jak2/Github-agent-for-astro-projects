@@ -45,6 +45,32 @@
   destructive-reclone race, both confirmed fixed). See `implementation.md`'s
   Change log for details.
 
+## Planned work — raised 2026-08-25 (design approved, not yet implemented)
+
+Eight items raised together; specced as five independent subsystems plus one
+blocking bug in
+`superpowers/specs/2026-08-25-multi-llm-observability-agent-controls-design.md`.
+
+| Phase | Item | Notes |
+|---|---|---|
+| **0** | **BUG: on-device LLM produces no output at all** — silent past 10 min, no error | Highest priority. `generate()` buffers the whole response and returns only at completion, so a working slow generation and a dead hang look identical. |
+| **1** | Per-step / per-token generation visibility | Same code change as Phase 0: `LlmEngine` gains an event stream; chat renders tokens live plus a real status line. |
+| **2** | Multi-LLM library — adding an LLM currently **replaces** the existing one | New `lib/settings/llm_library.dart`; one list holding both on-device and cloud entries. Switching auto-unloads the previous model. Deletion made explicit about whether the file is removed from disk. |
+| **3a** | Live CPU/RAM in the chat top bar | This app's own usage from `/proc/self`, no new dependency. Never a fabricated number. |
+| **3b–c** | Scroll to newest content after repo selection and icon interactions | Applied to all insertions, not special-cased. |
+| **3d** | Collapsible folders in the file tree | Feasibility gate: needs real widgets over `lib/files/file_tree.dart`. If the tree is flat text today, the display is rebuilt (text path for LLM context stays). |
+| **4** | LangChain/LangGraph toggles made real: descriptions, haptics, loop-depth control | Extends `AgentConfig`; adds a `◀ 3 ▶` stepper to `app_theme.dart` (no stepper exists yet). Must state plainly that no framework backend exists yet rather than implying an effect. |
+| **5** | Multi-step task decomposition with per-step output + consolidated result | Cloud only (refused on-device, with an in-UI explanation). Hard 5-step cap, hard token budget, confirm-before-run, running compact summary instead of resending step outputs, live cost counter, kill switch. |
+
+Confirmed with the user during design: one unified LLM list (on-device +
+cloud); switching unloads the old model; metrics are app-scoped; Phase 5 is
+cloud-only and conservative on cost.
+
+Open items to confirm before implementation: whether the chat screen shares
+Config's `OnDeviceEngineRegistry` instance; whether the folder tree is widgets
+or flat text; whether a prior agreed value exists for Phase 4's loop levels;
+`/proc/self` readability on the physical device.
+
 ## Open points (deferred, not blocking v1)
 
 - Full OAuth device/web flow instead of PAT.
