@@ -46,13 +46,20 @@ flutter run   # or: flutter build apk --debug
 - **If the project lives on an NTFS/exFAT mount** (`chmod +x` is a no-op there),
   Flutter's tooling can't exec `android/gradlew` directly. Build via
   `bash android/gradlew assembleDebug` instead of `flutter build apk` in that case.
-- **`llama_cpp_dart` needs a one-time manual step.** It vendors `llama.cpp` as a git
-  submodule that pub.dev's package archive doesn't include, so the on-device build
-  fails with a CMake `add_subdirectory` error until you run, once per machine:
+- **`llama_cpp_dart` needs a one-time manual step, once per machine.** It vendors
+  `llama.cpp` as a git submodule that pub.dev's package archive doesn't include, so the
+  on-device build fails with a CMake `add_subdirectory` error until you clone it — and
+  the package then needs pinning plus two patches, or on-device model loading appears to
+  hang for 300 seconds:
   ```bash
-  cd ~/.pub-cache/hosted/pub.dev/llama_cpp_dart-0.0.9/src
-  git clone --depth 1 https://github.com/ggml-org/llama.cpp.git llama.cpp
+  git clone https://github.com/ggml-org/llama.cpp.git \
+    ~/.pub-cache/hosted/pub.dev/llama_cpp_dart-0.0.9/src/llama.cpp
+  bash scripts/setup_llama_cpp_dart.sh   # pins llama.cpp + patches the package
   ```
+  Re-run the script after `dart pub cache repair` (it's idempotent), then do a clean
+  native rebuild. Why it's needed: `docs/on_device_load_hang_rootcause.md`. Note the
+  clone must be a full clone, not `--depth 1`, since the script checks out a pinned
+  commit.
 - **`compileSdk` mismatch on `llama_cpp_dart`.** Already fixed in
   `android/build.gradle.kts` (forces `compileSdk 36` on every Android library
   subproject) — no action needed, just don't remove that block.

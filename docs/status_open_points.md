@@ -64,8 +64,17 @@
   does the manual smoke test described in the plan's Task 8 (clone) and Task 15
   (commit + push), confirming the repo actually clones and a real commit lands and
   pushes to GitHub.
-- On-device gguf inference performance/memory on target Android hardware is unverified;
-  cloud path should be the one exercised first end-to-end.
+- On-device gguf *loading* is now verified on the vivo V2231 (qwen2.5-0.5B-q5_K_M loads
+  in ~2.2s). Inference performance/memory after load is still unverified; the cloud path
+  should still be the one exercised first end-to-end.
+- **On-device load requires a one-time per-machine setup step**:
+  `bash scripts/setup_llama_cpp_dart.sh`, then a clean native rebuild. It pins
+  `llama.cpp` to `ab1401982` and patches two `llama_cpp_dart` bugs. Skipping it, or
+  running `dart pub cache repair`, brings the "300-second hang" straight back. Full
+  root-cause writeup in `on_device_load_hang_rootcause.md`.
+- **Never bump the pinned `llama.cpp` commit casually.** The 0.0.9 FFI bindings are
+  generated code with no compile-time validation; a reordered struct field in
+  `llama_model_params`/`llama_context_params` yields a silent SIGSEGV, not a build error.
 - **Known limitation, not fixable without a library change:** true percentage-based
   model-load progress is unavailable — `llama_cpp_dart 0.0.9`'s `ModelParams`
   hardcodes libgit2's `progress_callback` to `nullptr`. Working around this with an

@@ -50,3 +50,9 @@ app.*.map.json
 # Root Android project's own build dir (subprojects redirect to top-level /build/
 # via android/build.gradle.kts, but the root project itself still writes here)
 /android/build/
+
+# Reverse-engineering reference material — large binaries, not needed in
+# version control (re-derivable by re-pulling the APK; see docs/future_scope.md)
+docs/PocketPal_1.16.1/
+docs/PocketPal_1.16.1.apk
+research/pocketpal_apk/

@@ -322,3 +322,23 @@ for `file_tree_text`, 3 for `pending_file_handoff`, 3 for `repo_browser_service`
 on-device smoke test (browse repos → select → browse files → ask about a file → structure
 a file and confirm the handoff lands in the GitHub tab) not yet run — needs a real GitHub
 PAT and LLM configured on a test device.
+
+## On-device model load: 300s "hang" resolved
+
+Tapping Load appeared to hang for 300s and fail with `Operation "model loading" timed
+out`. The model was in fact loading successfully in ~3s every time; an
+`undefined symbol: llama_model_get_vocab` error was then hidden by three layers — a
+no-op llama.cpp log callback, a `dispose()` that threw `LateInitializationError` over
+the real exception, and a `LlamaParent._onData` that never completes the pending
+operation on an error response, so the caller waited out its full timeout.
+
+Root cause was an ABI mismatch we introduced ourselves: the earlier `llama.cpp`
+pin to `42ae10bb` (taken from the package changelog's 0.0.8 note) predates the
+bindings 0.0.9 was generated against. Fixed by pinning to `ab1401982`, whose
+`llama_model_params` and `llama_context_params` match the bindings field-for-field,
+plus two upstream-bug patches so failures report themselves honestly. Applied by
+`scripts/setup_llama_cpp_dart.sh` since it all lives in `~/.pub-cache`, outside the repo.
+
+Verified on-device: qwen2.5-0.5B-instruct-q5_K_M loads in ~2.2s.
+Full analysis, including the eight ruled-out hypotheses, in
+`docs/on_device_load_hang_rootcause.md`.
