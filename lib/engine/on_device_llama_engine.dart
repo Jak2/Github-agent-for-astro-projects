@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:llama_cpp_dart/llama_cpp_dart.dart';
 import 'generation_event.dart';
 import 'llm_engine.dart';
@@ -45,25 +47,60 @@ class OnDeviceLlamaEngine implements LlmEngine {
     await parent?.dispose();
   }
 
-  // ponytail: temporary stub, Task 3 of the generation-observability plan
-  // replaces this with the real event-emitting implementation.
   @override
-  Stream<GenerationEvent> generateStream(String prompt) =>
-      throw UnimplementedError();
+  Future<String> generate(String prompt) => bufferStream(generateStream(prompt));
 
   @override
-  Future<String> generate(String prompt) async {
-    final parent = await _ensureLoaded();
-    final buffer = StringBuffer();
-    final sub = parent.stream.listen(buffer.write);
+  Stream<GenerationEvent> generateStream(String prompt) async* {
+    if (_parent == null) {
+      yield const GenerationStatus('loading model…');
+    }
+    final LlamaParent parent;
     try {
-      final promptId = await parent.sendPrompt(prompt);
-      await parent.completions
-          .firstWhere((event) => event.promptId == promptId)
-          .timeout(const Duration(seconds: 120));
+      parent = await _ensureLoaded();
+    } catch (e) {
+      yield GenerationError('Model failed to load: $e');
+      return;
+    }
+    yield const GenerationStatus('model ready');
+
+    final buffer = StringBuffer();
+    final tokens = StreamController<String>();
+    final sub = parent.stream.listen(tokens.add, onError: tokens.addError);
+
+    // Subscribe to completions BEFORE sending the prompt. Subscribing after
+    // `sendPrompt` returns leaves a window where the completion event can fire
+    // unobserved on this broadcast stream, which strands the caller until a
+    // timeout — one of the suspected causes of the silent-generation bug.
+    final completion = parent.completions.first;
+
+    try {
+      yield const GenerationStatus('prompt sent');
+      await parent.sendPrompt(prompt);
+
+      var count = 0;
+      final done = completion.whenComplete(tokens.close);
+
+      await for (final token in tokens.stream) {
+        buffer.write(token);
+        count++;
+        yield GenerationToken(token);
+        if (count % 8 == 0) {
+          yield GenerationStatus('generating ($count tokens)');
+        }
+      }
+
+      final event = await done;
+      if (!event.success) {
+        yield GenerationError(event.errorDetails ?? 'Generation failed');
+        return;
+      }
+      yield GenerationDone(buffer.toString());
+    } catch (e) {
+      yield GenerationError('$e');
     } finally {
       await sub.cancel();
+      if (!tokens.isClosed) await tokens.close();
     }
-    return buffer.toString();
   }
 }
