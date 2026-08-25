@@ -32,6 +32,7 @@ String _stat({required int utime, required int stime, String comm = 'my (app)'})
 }
 
 void main() {
+  _cpuShareTests();
   group('parseVmRssKb', () {
     test('reads the VmRSS line in kB', () {
       expect(parseVmRssKb(_status), 148256);
@@ -126,6 +127,26 @@ void main() {
       m.stop();
       final resumed = m.update(statusText: _status, statText: _stat(utime: 9000, stime: 0), nowMillis: 60000);
       expect(resumed.cpuPercent, isNull);
+    });
+  });
+}
+
+void _cpuShareTests() {
+  group('cpuPercentOfDevice', () {
+    test('divides the top-style figure by the core count', () {
+      const s = DeviceSnapshot(cpuPercent: 400, cores: 8);
+      expect(s.cpuPercentOfDevice, 50);
+    });
+
+    test('clamps to 100 rather than reporting more than the whole device', () {
+      const s = DeviceSnapshot(cpuPercent: 900, cores: 8);
+      expect(s.cpuPercentOfDevice, 100);
+    });
+
+    test('is null when cpu or cores are unknown', () {
+      expect(const DeviceSnapshot(cores: 8).cpuPercentOfDevice, isNull);
+      expect(const DeviceSnapshot(cpuPercent: 50).cpuPercentOfDevice, isNull);
+      expect(const DeviceSnapshot(cpuPercent: 50, cores: 0).cpuPercentOfDevice, isNull);
     });
   });
 }

@@ -19,12 +19,31 @@ class DeviceSnapshot {
   /// Resident set size in kB, or null if /proc/self/status was unreadable.
   final int? rssKb;
 
-  /// Process CPU use as a percentage of one wall-clock second. Null on the
-  /// first sample (nothing to difference against) or on a failed read. May
-  /// exceed 100 — this process has several threads.
+  /// Process CPU use as a percentage of one wall-clock second, the way `top`
+  /// reports it. Null on the first sample (nothing to difference against) or
+  /// on a failed read. May exceed 100 — this process has several threads, and
+  /// eight busy threads on eight cores is 800%.
   final double? cpuPercent;
 
-  const DeviceSnapshot({this.rssKb, this.cpuPercent});
+  /// Cores available to the process, used to make [cpuPercentOfDevice]
+  /// meaningful. Null when unknown.
+  final int? cores;
+
+  const DeviceSnapshot({this.rssKb, this.cpuPercent, this.cores});
+
+  /// CPU use as a share of the whole device, 0–100.
+  ///
+  /// The raw `top`-style number is what the kernel gives us, but "CPU 633%"
+  /// reads as broken to anyone who is not thinking in thread-seconds. Dividing
+  /// by the core count answers the question the readout is actually asking:
+  /// how much of this phone is this app using.
+  double? get cpuPercentOfDevice {
+    final raw = cpuPercent;
+    final n = cores;
+    if (raw == null || n == null || n <= 0) return null;
+    final share = raw / n;
+    return share > 100 ? 100 : share;
+  }
 }
 
 /// Pulls `VmRSS:    123456 kB` out of `/proc/<pid>/status`. Null if absent.
@@ -61,6 +80,7 @@ class DeviceMetrics {
   /// produce a snapshot and remember what the next call needs to difference
   /// against. Either text may be null (read failed).
   DeviceSnapshot update({
+    int? cores,
     required String? statusText,
     required String? statText,
     required int nowMillis,
@@ -72,22 +92,22 @@ class DeviceMetrics {
       // tick delta by a bogus interval.
       _lastTicks = null;
       _lastMillis = null;
-      return DeviceSnapshot(rssKb: rssKb);
+      return DeviceSnapshot(rssKb: rssKb, cores: cores);
     }
 
     final prevTicks = _lastTicks;
     final prevMillis = _lastMillis;
     _lastTicks = ticks;
     _lastMillis = nowMillis;
-    if (prevTicks == null || prevMillis == null) return DeviceSnapshot(rssKb: rssKb);
+    if (prevTicks == null || prevMillis == null) return DeviceSnapshot(rssKb: rssKb, cores: cores);
 
     final elapsedMillis = nowMillis - prevMillis;
     final deltaTicks = ticks - prevTicks;
-    if (elapsedMillis <= 0 || deltaTicks < 0) return DeviceSnapshot(rssKb: rssKb);
+    if (elapsedMillis <= 0 || deltaTicks < 0) return DeviceSnapshot(rssKb: rssKb, cores: cores);
 
     final cpuSeconds = deltaTicks / kUserHz;
     final percent = cpuSeconds / (elapsedMillis / 1000) * 100;
-    return DeviceSnapshot(rssKb: rssKb, cpuPercent: percent);
+    return DeviceSnapshot(rssKb: rssKb, cpuPercent: percent, cores: cores);
   }
 
   /// One reading. Returns null only if neither figure could be read at all —
@@ -97,6 +117,7 @@ class DeviceMetrics {
     final stat = await _readOrNull('/proc/self/stat');
     if (status == null && stat == null) return null;
     return update(
+      cores: Platform.numberOfProcessors,
       statusText: status,
       statText: stat,
       nowMillis: DateTime.now().millisecondsSinceEpoch,

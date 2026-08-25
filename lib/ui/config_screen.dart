@@ -11,6 +11,7 @@ import '../instructions/instruction_library.dart';
 import '../secrets/secret_store.dart';
 import '../settings/agent_config.dart';
 import '../settings/engine_settings.dart';
+import '../settings/llm_library.dart';
 import '../theme/app_theme.dart';
 
 class ConfigScreen extends StatefulWidget {
@@ -22,12 +23,11 @@ class ConfigScreen extends StatefulWidget {
 }
 
 class _ConfigScreenState extends State<ConfigScreen> {
-  EngineSettings _settings = const EngineSettings();
   final _patController = TextEditingController();
-  final _endpointController = TextEditingController();
-  final _apiKeyController = TextEditingController();
-  final _modelController = TextEditingController();
-  final _headersController = TextEditingController();
+
+  /// The saved LLMs. This is the truth about which engine the app uses;
+  /// [EngineSettings] is kept as its mirror by [applyActiveEntry].
+  LlmLibrary _library = const LlmLibrary();
   String? _structureMdOverridePath;
   bool _loading = true;
   InstructionLibrary? _skillsLibrary;
@@ -52,7 +52,9 @@ class _ConfigScreenState extends State<ConfigScreen> {
       final settings = await EngineSettings.load(prefs);
       final agentConfig = await AgentConfig.load(prefs);
       final pat = await widget.secretStore.read(secretKeyGithubPat) ?? '';
-      final apiKey = await widget.secretStore.read(secretKeyCloudApiKey) ?? '';
+      // Imports a pre-library setup on first run, so upgrading does not look
+      // like the app forgot the LLM the user had configured.
+      final library = await loadLlmLibrary(prefs, widget.secretStore);
 
       final docs = await getApplicationDocumentsDirectory();
       final skillsLibrary = InstructionLibrary(root: Directory('${docs.path}/skills'));
@@ -62,13 +64,9 @@ class _ConfigScreenState extends State<ConfigScreen> {
 
       if (!mounted) return;
       setState(() {
-        _settings = settings;
+        _library = library;
         _agentConfig = agentConfig;
         _patController.text = pat;
-        _endpointController.text = settings.cloudEndpoint;
-        _apiKeyController.text = apiKey;
-        _modelController.text = settings.cloudModel;
-        _headersController.text = settings.cloudHeaders;
         _guardrailsController.text = agentConfig.guardrails;
         _structureMdOverridePath =
             settings.structureMdOverridePath.isEmpty ? null : settings.structureMdOverridePath;
@@ -86,16 +84,12 @@ class _ConfigScreenState extends State<ConfigScreen> {
     }
   }
 
+  /// Saves only what this button owns. LLM entries and the agent-framework
+  /// switches persist at the moment they change, so Save can never be the
+  /// difference between what the screen shows and what the app will do.
   Future<void> _save() async {
     final prefs = await SharedPreferences.getInstance();
-    final updated = _settings.copyWith(
-      cloudEndpoint: _endpointController.text,
-      cloudModel: _modelController.text,
-      cloudHeaders: _headersController.text,
-    );
-    await updated.save(prefs);
     await widget.secretStore.write(secretKeyGithubPat, _patController.text);
-    await widget.secretStore.write(secretKeyCloudApiKey, _apiKeyController.text);
 
     final updatedAgentConfig = _agentConfig.copyWith(guardrails: _guardrailsController.text);
     await updatedAgentConfig.save(prefs);
@@ -241,16 +235,239 @@ class _ConfigScreenState extends State<ConfigScreen> {
     );
   }
 
-  Future<void> _pickOnDeviceModel() async {
+  String _newEntryId() => DateTime.now().microsecondsSinceEpoch.toRadixString(36);
+
+  /// Saves [library], re-mirrors it into [EngineSettings] so the chat screen
+  /// resolves the same engine, and says out loud what just happened.
+  Future<void> _commit(LlmLibrary library, String message) async {
+    final prefs = await SharedPreferences.getInstance();
+    await library.save(prefs);
+    await applyActiveEntry(library, prefs, widget.secretStore);
+    if (!mounted) return;
+    setState(() => _library = library);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), duration: const Duration(seconds: 5)),
+    );
+  }
+
+  Future<T?> _choiceDialog<T>({
+    required String title,
+    required String body,
+    required Map<String, T> choices,
+  }) {
+    return showDialog<T>(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: AppColors.bg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(18),
+          side: const BorderSide(color: AppColors.fg, width: 3),
+        ),
+        title: Text(title, style: appHeading(size: 16, weight: FontWeight.w700)),
+        content: Text(body, style: appBody(size: 13)),
+        actions: [
+          for (final choice in choices.entries)
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(choice.value),
+              child: Text(choice.key, style: appBody(size: 13, weight: FontWeight.w600)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Appends an on-device model. Never replaces one: that was the bug.
+  Future<void> _addOnDeviceModel() async {
     final result = await FilePicker.platform.pickFiles(type: FileType.any);
     final path = result?.files.single.path;
-    if (path != null) {
-      setState(() => _settings = _settings.copyWith(onDeviceModelPath: path));
+    if (path == null) return;
+    if (_library.entries.any((e) => e.modelPath == path)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('That model file is already in the list.')));
+      }
+      return;
+    }
+    final entry = LlmEntry.onDevice(
+      id: _newEntryId(),
+      label: path.split('/').last,
+      modelPath: path,
+    );
+    await _commit(_library.add(entry), 'Added "${entry.label}". Existing models were kept.');
+  }
+
+  Future<void> _addCloudModel() async {
+    final label = TextEditingController();
+    final endpoint = TextEditingController();
+    final model = TextEditingController();
+    final apiKey = TextEditingController();
+    final headers = TextEditingController();
+    try {
+      final saved = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: AppColors.bg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: const BorderSide(color: AppColors.fg, width: 3),
+          ),
+          title: Text('Add cloud LLM', style: appHeading(size: 16, weight: FontWeight.w700)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                appBorderedField(controller: label, hint: 'Name (optional)'),
+                const SizedBox(height: 10),
+                appBorderedField(controller: endpoint, hint: 'Endpoint URL'),
+                const SizedBox(height: 10),
+                appBorderedField(controller: apiKey, hint: 'API key', obscure: true),
+                const SizedBox(height: 10),
+                appBorderedField(controller: model, hint: 'Model name (optional)'),
+                const SizedBox(height: 10),
+                appBorderedField(
+                  controller: headers,
+                  hint: 'Extra headers (Name: value per line)',
+                  maxLines: 2,
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text('Cancel', style: appBody(size: 13, weight: FontWeight.w600)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text('Add', style: appBody(size: 13, weight: FontWeight.w600)),
+            ),
+          ],
+        ),
+      );
+      if (saved != true) return;
+
+      final url = endpoint.text.trim();
+      if (url.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Not added — a cloud LLM needs an endpoint URL.')));
+        }
+        return;
+      }
+      final name = model.text.trim();
+      final entry = LlmEntry.cloud(
+        id: _newEntryId(),
+        label: label.text.trim().isNotEmpty
+            ? label.text.trim()
+            : (name.isNotEmpty ? name : 'Cloud API'),
+        endpoint: url,
+        model: name,
+        headers: headers.text,
+      );
+      // The key goes to secure storage under this entry's own name; the entry
+      // itself has nowhere to hold a secret, so nothing key-shaped can reach
+      // shared_preferences.
+      await widget.secretStore.write(entry.secretKey!, apiKey.text);
+      await _commit(
+        _library.add(entry),
+        'Added "${entry.label}". Its API key is in secure storage, not in settings.',
+      );
+    } finally {
+      label.dispose();
+      endpoint.dispose();
+      model.dispose();
+      apiKey.dispose();
+      headers.dispose();
     }
   }
 
-  Future<void> _loadModel() async {
-    final path = _settings.onDeviceModelPath;
+  /// Makes [entry] the active LLM.
+  ///
+  /// Any model currently resident is unloaded first: only one model stays in
+  /// memory at a time, because two loaded models on a phone invites the OS to
+  /// kill the app.
+  Future<void> _activate(LlmEntry entry) async {
+    setState(() => _modelBusy = true);
+    try {
+      final loadedPath = OnDeviceEngineRegistry.instance.loadedModelPath;
+      final unloaded = loadedPath != null && loadedPath != entry.modelPath;
+      if (unloaded) await OnDeviceEngineRegistry.instance.unload();
+      await _commit(
+        _library.setActive(entry.id),
+        unloaded
+            ? 'Now using "${entry.label}". The previously loaded model was unloaded first — '
+                'only one model stays in memory.'
+            : 'Now using "${entry.label}".',
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('Could not switch model: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _modelBusy = false);
+    }
+  }
+
+  /// Removing an entry always states which of the two things happened: the
+  /// file was deleted, or it is still sitting on the device. Not knowing which
+  /// is the complaint this whole section exists to fix.
+  Future<void> _confirmRemove(LlmEntry entry) async {
+    if (entry.kind == LlmKind.cloud) {
+      final confirmed = await _choiceDialog<bool>(
+        title: 'Remove "${entry.label}"?',
+        body: 'This removes the cloud LLM from your library and clears its API key from this '
+            "device's secure storage. Nothing is changed on the provider's side.",
+        choices: {'Cancel': false, 'Remove': true},
+      );
+      if (confirmed != true) return;
+      await widget.secretStore.write(entry.secretKey!, '');
+      await _commit(
+        _library.remove(entry.id),
+        'Removed "${entry.label}" and cleared its stored API key.',
+      );
+      return;
+    }
+
+    final path = entry.modelPath ?? '';
+    final choice = await _choiceDialog<String>(
+      title: 'Remove "${entry.label}"?',
+      body: 'The model file is at:\n$path\n\n'
+          'Remove from list — the file stays on your device, keeps using its storage, and you '
+          'can add it again later.\n\n'
+          'Delete file too — the file is erased from your device permanently.',
+      choices: {'Cancel': 'cancel', 'Remove from list': 'keep', 'Delete file too': 'delete'},
+    );
+    if (choice == null || choice == 'cancel') return;
+
+    setState(() => _modelBusy = true);
+    try {
+      if (OnDeviceEngineRegistry.instance.isLoadedFor(path)) {
+        await OnDeviceEngineRegistry.instance.unload();
+      }
+      var outcome =
+          'Removed "${entry.label}" from the list. The file is still on your device at $path.';
+      if (choice == 'delete') {
+        final file = File(path);
+        if (await file.exists()) {
+          await file.delete();
+          outcome = 'Removed "${entry.label}" and deleted the file from your device: $path';
+        } else {
+          outcome = 'Removed "${entry.label}". No file was deleted — nothing exists at $path.';
+        }
+      }
+      await _commit(_library.remove(entry.id), outcome);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Nothing was removed — deleting the file failed: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _modelBusy = false);
+    }
+  }
+
+  Future<void> _loadModel(String path) async {
     if (path.isEmpty) return;
 
     // Fail fast on an obviously bad file instead of waiting out the full
@@ -305,119 +522,144 @@ class _ConfigScreenState extends State<ConfigScreen> {
     }
   }
 
-  Future<void> _confirmUninstallModel() async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.bg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: AppColors.fg, width: 3),
-        ),
-        title: Text('Uninstall model?', style: appHeading(size: 16, weight: FontWeight.w700)),
-        content: Text(
-          'This deletes the model file from your device. You can re-add it later by choosing the file again.',
-          style: appBody(size: 13),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text('Cancel', style: appBody(size: 13, weight: FontWeight.w600)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: Text('Uninstall', style: appBody(size: 13, weight: FontWeight.w600)),
-          ),
-        ],
-      ),
-    );
-    if (confirmed == true) await _uninstallModel();
-  }
+  Widget _entryCard(LlmEntry entry) {
+    final isActive = entry.id == _library.activeEntryId;
+    final isOnDevice = entry.kind == LlmKind.onDevice;
+    final path = entry.modelPath ?? '';
+    final loaded = isOnDevice && OnDeviceEngineRegistry.instance.isLoadedFor(path);
 
-  Future<void> _uninstallModel() async {
-    final path = _settings.onDeviceModelPath;
-    if (path.isEmpty) return;
-    setState(() => _modelBusy = true);
-    try {
-      await OnDeviceEngineRegistry.instance.unload();
-      final file = File(path);
-      if (await file.exists()) await file.delete();
-      final prefs = await SharedPreferences.getInstance();
-      final updated = _settings.copyWith(onDeviceModelPath: '');
-      await updated.save(prefs);
-      if (mounted) setState(() => _settings = updated);
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Failed to uninstall model: $e')));
-      }
-    } finally {
-      if (mounted) setState(() => _modelBusy = false);
-    }
-  }
-
-  Widget _modelsSection() {
-    final path = _settings.onDeviceModelPath;
-    if (path.isEmpty) {
-      return Text(
-        'No model added yet — pick one above under "On-device (.gguf)".',
-        style: appBody(size: 12.5, color: AppColors.muted),
-      );
-    }
-    final loaded = OnDeviceEngineRegistry.instance.isLoadedFor(path);
-    final name = path.split('/').last;
     return Container(
+      margin: const EdgeInsets.only(bottom: 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       decoration: BoxDecoration(
-        border: Border.all(color: AppColors.fg, width: 2),
+        border: Border.all(color: AppColors.fg, width: isActive ? 3 : 2),
         borderRadius: BorderRadius.circular(10),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(name, style: appBody(size: 13.5, weight: FontWeight.w600), overflow: TextOverflow.ellipsis),
-          const SizedBox(height: 4),
           Row(
             children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: loaded ? Colors.greenAccent : AppColors.muted,
-                  shape: BoxShape.circle,
+              Expanded(
+                child: Text(
+                  entry.label,
+                  style: appBody(size: 13.5, weight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
-              const SizedBox(width: 6),
-              Text(
-                loaded ? 'Active — loaded in memory' : 'Not loaded',
-                style: appMono(size: 11, color: loaded ? Colors.greenAccent : AppColors.muted),
-              ),
+              if (isActive) Text('ACTIVE', style: appMono(size: 10).copyWith(letterSpacing: 1.2)),
             ],
           ),
+          const SizedBox(height: 2),
+          Text(
+            isOnDevice ? 'On-device (.gguf) · $path' : 'Cloud · ${entry.endpoint}',
+            style: appMono(size: 11, color: AppColors.muted),
+            overflow: TextOverflow.ellipsis,
+          ),
+          if (isOnDevice) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: loaded ? Colors.greenAccent : AppColors.muted,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(
+                  loaded ? 'Loaded in memory' : 'Not loaded',
+                  style: appMono(size: 11, color: loaded ? Colors.greenAccent : AppColors.muted),
+                ),
+              ],
+            ),
+          ],
           const SizedBox(height: 10),
           Row(
             children: [
-              Expanded(
-                child: appSecondaryButton(
-                  label: loaded ? 'Loaded' : (_modelBusy ? 'Loading… ${_modelBusyElapsedSeconds}s' : 'Load'),
-                  onPressed: (loaded || _modelBusy) ? null : _loadModel,
+              if (!isActive) ...[
+                Expanded(
+                  child: appSecondaryButton(
+                    label: 'Use',
+                    onPressed: _modelBusy ? null : () => _activate(entry),
+                  ),
                 ),
-              ),
-              const SizedBox(width: 8),
+                const SizedBox(width: 8),
+              ],
               Expanded(
                 child: appSecondaryButton(
-                  label: 'Offload',
-                  onPressed: (!loaded || _modelBusy) ? null : _offloadModel,
+                  label: 'Remove',
+                  onPressed: _modelBusy ? null : () => _confirmRemove(entry),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
-          appSecondaryButton(
-            label: 'Uninstall',
-            onPressed: _modelBusy ? null : _confirmUninstallModel,
-          ),
+          if (isActive && isOnDevice) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                Expanded(
+                  child: appSecondaryButton(
+                    label: loaded
+                        ? 'Loaded'
+                        : (_modelBusy ? 'Loading… ${_modelBusyElapsedSeconds}s' : 'Load'),
+                    onPressed: (loaded || _modelBusy) ? null : () => _loadModel(path),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: appSecondaryButton(
+                    label: 'Offload',
+                    onPressed: (!loaded || _modelBusy) ? null : _offloadModel,
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
+    );
+  }
+
+  Widget _modelsSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_library.entries.isEmpty)
+          Text(
+            'No LLMs saved yet. Add an on-device .gguf file or a cloud API below — '
+            'adding one never replaces another.',
+            style: appBody(size: 12.5, color: AppColors.muted),
+          )
+        else ...[
+          for (final entry in _library.entries) _entryCard(entry),
+          if (_library.activeEntry == null)
+            Text(
+              'None selected — pick one with "Use", or the chat has no engine to talk to.',
+              style: appBody(size: 12.5, color: AppColors.muted),
+            ),
+        ],
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: appSecondaryButton(
+                label: '+ On-device',
+                onPressed: _modelBusy ? null : _addOnDeviceModel,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: appSecondaryButton(
+                label: '+ Cloud API',
+                onPressed: _modelBusy ? null : _addCloudModel,
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 
@@ -426,12 +668,11 @@ class _ConfigScreenState extends State<ConfigScreen> {
     final path = result?.files.single.path;
     if (path != null) {
       final prefs = await SharedPreferences.getInstance();
-      final updated = _settings.copyWith(structureMdOverridePath: path);
+      // Re-read rather than reusing a settings object captured at load: the
+      // active-entry mirror writes to the same store between then and now.
+      final updated = (await EngineSettings.load(prefs)).copyWith(structureMdOverridePath: path);
       await updated.save(prefs);
-      setState(() {
-        _settings = updated;
-        _structureMdOverridePath = path;
-      });
+      setState(() => _structureMdOverridePath = path);
     }
   }
 
@@ -513,61 +754,14 @@ class _ConfigScreenState extends State<ConfigScreen> {
                 appBorderedField(controller: _patController, hint: 'ghp_xxxxxxxxxxxx', obscure: true),
                 const SizedBox(height: 22),
 
-                Text('LLM Engine', style: appHeading(size: 14, weight: FontWeight.w700)),
-                RadioListTile<EngineChoice>(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text('Cloud API', style: appBody(size: 14)),
-                  value: EngineChoice.cloud,
-                  groupValue: _settings.choice,
-                  onChanged: (v) => setState(() => _settings = _settings.copyWith(choice: v)),
+                Text('LLM library', style: appHeading(size: 14, weight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Text(
+                  'Every LLM you have saved. The one marked ACTIVE is what the chat talks to. '
+                  'Only one on-device model is ever held in memory at a time.',
+                  style: appBody(size: 11.5, color: AppColors.muted),
                 ),
-                if (_settings.choice == EngineChoice.cloud) ...[
-                  Padding(
-                    padding: const EdgeInsets.only(left: 12, bottom: 8),
-                    child: Column(
-                      children: [
-                        appBorderedField(controller: _endpointController, hint: 'Endpoint URL'),
-                        const SizedBox(height: 8),
-                        appBorderedField(controller: _apiKeyController, hint: 'API key', obscure: true),
-                        const SizedBox(height: 8),
-                        appBorderedField(controller: _modelController, hint: 'Model name (optional)'),
-                        const SizedBox(height: 8),
-                        appBorderedField(controller: _headersController, hint: 'Extra headers (Name: value per line)', maxLines: 2),
-                      ],
-                    ),
-                  ),
-                ],
-                RadioListTile<EngineChoice>(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text('On-device (.gguf)', style: appBody(size: 14)),
-                  value: EngineChoice.onDevice,
-                  groupValue: _settings.choice,
-                  onChanged: (v) => setState(() => _settings = _settings.copyWith(choice: v)),
-                ),
-                if (_settings.choice == EngineChoice.onDevice)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 12),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            _settings.onDeviceModelPath.isEmpty ? 'No model selected' : _settings.onDeviceModelPath,
-                            style: appMono(size: 11.5, color: AppColors.muted),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        SizedBox(
-                          width: 120,
-                          child: appSecondaryButton(label: 'Choose file', onPressed: _pickOnDeviceModel),
-                        ),
-                      ],
-                    ),
-                  ),
-                const SizedBox(height: 22),
-
-                Text('Models', style: appHeading(size: 14, weight: FontWeight.w700)),
-                const SizedBox(height: 8),
+                const SizedBox(height: 10),
                 _modelsSection(),
                 const SizedBox(height: 22),
 
@@ -695,10 +889,6 @@ class _ConfigScreenState extends State<ConfigScreen> {
   @override
   void dispose() {
     _patController.dispose();
-    _endpointController.dispose();
-    _apiKeyController.dispose();
-    _modelController.dispose();
-    _headersController.dispose();
     _guardrailsController.dispose();
     _modelBusyTimer?.cancel();
     super.dispose();

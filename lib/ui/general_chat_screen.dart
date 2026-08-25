@@ -591,7 +591,9 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
   /// This app's own CPU and RAM. An em-dash means the reading was unavailable
   /// — never the last good value dressed up as live.
   Widget _metricsReadout() {
-    final cpu = _snapshot?.cpuPercent;
+    // Device-relative, not the top-style per-process sum: 'CPU 633%'
+    // is technically right and reads as a bug.
+    final cpu = _snapshot?.cpuPercentOfDevice;
     final rssKb = _snapshot?.rssKb;
     final style = appMono(size: 11, color: AppColors.muted);
     return Column(

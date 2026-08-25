@@ -2,6 +2,9 @@ import 'dart:convert';
 
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../secrets/secret_store.dart';
+import 'engine_settings.dart';
+
 enum LlmKind { onDevice, cloud }
 
 /// One saved LLM the user can activate.
@@ -213,5 +216,111 @@ class LlmLibrary {
         'activeEntryId': activeEntryId,
       }),
     );
+  }
+}
+
+/// Ids given to entries imported from a pre-library install. Fixed rather than
+/// generated so a second migration pass can never duplicate them.
+const legacyOnDeviceEntryId = 'legacy-on-device';
+const legacyCloudEntryId = 'legacy-cloud';
+
+/// Loads the library, importing a pre-library setup on first run.
+///
+/// Before the library existed, Config held exactly one on-device path and one
+/// set of cloud fields in [EngineSettings]. On upgrade those become the first
+/// entries — including copying the single stored API key to the cloud entry's
+/// own [LlmEntry.secretKey] — so nobody loses the LLM they had configured.
+/// The entry matching the engine they were actually using stays active.
+///
+/// Runs only when the stored library is empty; once anything is saved, the
+/// library is the truth and [EngineSettings] is its mirror (see
+/// [applyActiveEntry]).
+Future<LlmLibrary> loadLlmLibrary(SharedPreferences prefs, SecretStore secrets) async {
+  final stored = await LlmLibrary.load(prefs);
+  if (stored.entries.isNotEmpty) return stored;
+
+  final legacy = await EngineSettings.load(prefs);
+  var library = const LlmLibrary();
+
+  if (legacy.onDeviceModelPath.isNotEmpty) {
+    library = library.add(LlmEntry.onDevice(
+      id: legacyOnDeviceEntryId,
+      label: legacy.onDeviceModelPath.split('/').last,
+      modelPath: legacy.onDeviceModelPath,
+    ));
+  }
+  if (legacy.cloudEndpoint.isNotEmpty) {
+    final imported = LlmEntry.cloud(
+      id: legacyCloudEntryId,
+      label: legacy.cloudModel.isEmpty ? 'Cloud API' : legacy.cloudModel,
+      endpoint: legacy.cloudEndpoint,
+      model: legacy.cloudModel,
+      headers: legacy.cloudHeaders,
+    );
+    library = library.add(imported);
+    final key = await secrets.read(secretKeyCloudApiKey);
+    if (key != null && key.isNotEmpty) {
+      await secrets.write(imported.secretKey!, key);
+    }
+  }
+
+  if (library.entries.isEmpty) return library;
+
+  final wanted =
+      legacy.choice == EngineChoice.onDevice ? legacyOnDeviceEntryId : legacyCloudEntryId;
+  if (library.entries.any((e) => e.id == wanted)) library = library.setActive(wanted);
+  await library.save(prefs);
+  return library;
+}
+
+/// Mirrors the active entry into [EngineSettings] and the single API-key slot
+/// the engine resolution path reads.
+///
+/// The library is the truth; [EngineSettings] is a derived copy kept in sync so
+/// `buildEngine()` and the chat screen keep resolving one engine from one
+/// place. With no active entry the mirror is blanked, which makes
+/// `buildEngine()` return null — the chat screen then says the LLM is not
+/// configured, rather than quietly using a model the user just deleted.
+Future<void> applyActiveEntry(
+  LlmLibrary library,
+  SharedPreferences prefs,
+  SecretStore secrets,
+) async {
+  final base = await EngineSettings.load(prefs);
+  final active = library.activeEntry;
+
+  if (active == null) {
+    await base
+        .copyWith(
+          choice: EngineChoice.cloud,
+          cloudEndpoint: '',
+          cloudModel: '',
+          cloudHeaders: '',
+          onDeviceModelPath: '',
+        )
+        .save(prefs);
+    await secrets.write(secretKeyCloudApiKey, '');
+    return;
+  }
+
+  switch (active.kind) {
+    case LlmKind.onDevice:
+      await base
+          .copyWith(
+            choice: EngineChoice.onDevice,
+            onDeviceModelPath: active.modelPath ?? '',
+          )
+          .save(prefs);
+    case LlmKind.cloud:
+      await base
+          .copyWith(
+            choice: EngineChoice.cloud,
+            cloudEndpoint: active.endpoint ?? '',
+            cloudModel: active.model ?? '',
+            cloudHeaders: active.headers ?? '',
+            onDeviceModelPath: '',
+          )
+          .save(prefs);
+      await secrets.write(secretKeyCloudApiKey, await secrets.read(active.secretKey!) ?? '');
   }
 }

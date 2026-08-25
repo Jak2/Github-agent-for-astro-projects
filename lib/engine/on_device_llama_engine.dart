@@ -4,6 +4,22 @@ import 'package:llama_cpp_dart/llama_cpp_dart.dart';
 import 'generation_event.dart';
 import 'llm_engine.dart';
 
+/// Context window used for on-device inference, in tokens.
+///
+/// Bigger costs RAM (KV cache) and prefill time on a phone; smaller rejects
+/// real repo trees. 4096 fits the trees seen so far with room for the reply.
+const int kOnDeviceContextTokens = 4096;
+
+/// Rough characters-per-token for English text and file paths. Used only to
+/// keep a prompt under [kOnDeviceContextTokens] before sending it — it is a
+/// conservative estimate, not a real tokenizer count.
+const double kCharsPerToken = 3.5;
+
+/// The largest prompt, in characters, that should be sent on-device — leaving
+/// headroom for the model's own reply.
+final int kMaxPromptChars =
+    ((kOnDeviceContextTokens - 512) * kCharsPerToken).floor();
+
 /// Markers that mean the model has stopped answering and started writing the
 /// rest of the transcript itself.
 ///
@@ -55,11 +71,20 @@ class OnDeviceLlamaEngine implements LlmEngine {
         // first time it tries to hand a layer to a GPU backend that isn't
         // there. Force CPU-only inference.
         modelParams: ModelParams()..nGpuLayers = 0,
-        // Defaults are nPredict = 32 and nCtx = 512, which truncate a reply
-        // mid-sentence and leave no room for repo-tree context.
+        // Defaults are nPredict = 32, nCtx = 512, nBatch = 512, which truncate
+        // a reply mid-sentence and leave no room for repo-tree context — a
+        // real repo tree measured 2325 tokens and was rejected outright with
+        // "Prompt token count exceeds batch capacity".
+        //
+        // nBatch must be >= the whole prompt: llama_cpp_dart submits the
+        // prompt as one logical batch and throws if it doesn't fit. nUbatch
+        // stays small because it only sets the physical micro-batch size, and
+        // raising it inflates the compute buffer for no benefit here.
         contextParams: ContextParams()
           ..nPredict = 256
-          ..nCtx = 2048,
+          ..nCtx = kOnDeviceContextTokens
+          ..nBatch = kOnDeviceContextTokens
+          ..nUbatch = 512,
         samplingParams: SamplerParams(),
       ),
     );
