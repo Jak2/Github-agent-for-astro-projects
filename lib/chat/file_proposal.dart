@@ -79,11 +79,11 @@ ProposalParseResult parseFileProposals(String reply) {
     }
     i++; // step past the closing fence, if there was one
 
-    final problem = _rejectionReason(rawPath);
+    final problem = filePathRejection(rawPath);
     if (problem != null) {
       rejected.add(RejectedProposal(rawPath, problem));
     } else {
-      proposals.add(FileProposal(path: _normalise(rawPath), content: body.join('\n')));
+      proposals.add(FileProposal(path: normaliseFilePath(rawPath), content: body.join('\n')));
     }
   }
 
@@ -93,8 +93,10 @@ ProposalParseResult parseFileProposals(String reply) {
 /// Why [path] must not be written, or null when it is safe.
 ///
 /// The model's output is untrusted input: it is free to emit `../../etc/passwd`
-/// or an absolute path, and this runs against the user's real repository.
-String? _rejectionReason(String path) {
+/// or an absolute path, and this runs against the user's real repository. So is
+/// a path the user has typed into the confirmation card — the same rules decide
+/// both, from here, so an edited path cannot take a softer route to disk.
+String? filePathRejection(String path) {
   if (path.isEmpty) return 'no path given';
   if (path.startsWith('/') || RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(path)) {
     return 'absolute paths are not allowed';
@@ -107,5 +109,7 @@ String? _rejectionReason(String path) {
   return null;
 }
 
-String _normalise(String path) =>
+/// Drops empty and `.` segments. Only ever applied to a path
+/// [filePathRejection] has already cleared.
+String normaliseFilePath(String path) =>
     path.split('/').where((s) => s.isNotEmpty && s != '.').join('/');

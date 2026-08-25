@@ -99,6 +99,19 @@ class RepoGitService {
     }
   }
 
+  /// Every uncommitted path — modified, added, deleted, untracked — sorted.
+  ///
+  /// The same merged view [statusLines] renders, minus the formatting: the
+  /// uncommitted-changes bar wants the paths themselves.
+  Future<List<String>> uncommittedPaths(Directory repoDir) async {
+    final repository = Repository.open(repoDir.path);
+    try {
+      return _fullStatus(repository).keys.toList()..sort();
+    } finally {
+      repository.free();
+    }
+  }
+
   /// `repository.status` runs libgit2 with default options, which omit
   /// untracked files entirely — a Status button blind to a new file is worse
   /// than no button, so the untracked half comes from an index-to-workdir

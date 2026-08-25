@@ -66,15 +66,27 @@ class _FileActionsItem extends _ChatItem {
 ///
 /// Not a [_TextItem], so it never reaches the prompt transcript.
 class _FileProposalItem extends _ChatItem {
-  final FileProposal proposal;
+  /// Both editable, pre-filled with what the model proposed. It routinely
+  /// produces an empty body or the wrong path, and re-prompting to fix a typo
+  /// costs more than typing over it. What is in these at press time is what
+  /// gets written — the parsed proposal is only the starting text.
+  final TextEditingController pathController;
+  final TextEditingController contentController;
 
-  /// Checked once, when the card is offered: decides Create vs Overwrite.
-  final bool exists;
+  /// Decides Create vs Overwrite. Re-checked whenever the path is edited.
+  bool exists;
 
   /// Set once the user has chosen, so the same write cannot be fired twice.
   bool handled = false;
 
-  _FileProposalItem(this.proposal, {required this.exists});
+  _FileProposalItem(FileProposal proposal, {required this.exists})
+      : pathController = TextEditingController(text: proposal.path),
+        contentController = TextEditingController(text: proposal.content);
+
+  void dispose() {
+    pathController.dispose();
+    contentController.dispose();
+  }
 }
 
 class GeneralChatScreen extends StatefulWidget {
@@ -120,6 +132,11 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
   /// What the questions are aimed at. Null means the whole repo, unstated.
   PinnedScope? _pinned;
 
+  /// Repo-relative paths of every uncommitted change — modified, added,
+  /// deleted, untracked. Refreshed only when something could have changed it;
+  /// never polled.
+  List<String> _uncommitted = const [];
+
   final _metrics = DeviceMetrics();
   DeviceSnapshot? _snapshot;
   AppLifecycleListener? _lifecycle;
@@ -146,6 +163,11 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     _genSub?.cancel();
     _scrollController.dispose();
     _inputController.dispose();
+    // Proposal cards own two controllers each and are never removed from the
+    // list, so this is where they die.
+    for (final item in _items) {
+      if (item is _FileProposalItem) item.dispose();
+    }
     super.dispose();
   }
 
@@ -247,8 +269,10 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         _openFileContent = null;
         _expandedDirs.clear(); // paths belonged to the previous repo
         _pinned = null; // so did the pin
+        _uncommitted = const []; // and so did those
         _append(_TextItem('Repo selected: ${repo.fullName}', fromUser: false));
       });
+      await _refreshUncommitted();
     } catch (e) {
       if (mounted) setState(() => _append(_TextItem('Failed to open repo: $e', fromUser: false, isNotice: true)));
     } finally {
@@ -392,12 +416,44 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     });
   }
 
+  /// The path field changed. Repaints so the live validation and the
+  /// Create/Overwrite label follow the text, then re-asks the filesystem.
+  Future<void> _proposalPathChanged(_FileProposalItem item) async {
+    final typed = item.pathController.text.trim();
+    // The error line and the Create button read the controller directly, so
+    // an empty setState is exactly the update they need.
+    setState(() {});
+    final dir = _activeRepoDir;
+    if (dir == null || filePathRejection(typed) != null) return;
+    final exists = await File('${dir.path}/${normaliseFilePath(typed)}').exists();
+    // Fast typing outruns the filesystem: only the answer for what is still
+    // in the field may land.
+    if (!mounted || item.pathController.text.trim() != typed) return;
+    setState(() => item.exists = exists);
+  }
+
   Future<void> _writeProposal(_FileProposalItem item) async {
     final dir = _activeRepoDir;
     if (dir == null) return; // a card is never offered without one
+    final typed = item.pathController.text.trim();
+    // The button is already disabled while this fails. Checked again anyway:
+    // this is the one place an edited path turns into a write, and it must
+    // not be a softer gate than the parser's.
+    final rejection = filePathRejection(typed);
+    if (rejection != null) {
+      setState(() => _append(_TextItem(
+            'Will not write "$typed" — $rejection.',
+            fromUser: false, isNotice: true,
+          )));
+      return;
+    }
+    final proposal = FileProposal(
+      path: normaliseFilePath(typed),
+      content: item.contentController.text,
+    );
     setState(() => item.handled = true);
     try {
-      final file = await writeProposal(dir, item.proposal);
+      final file = await writeProposal(dir, proposal);
       final tree = await buildFileTree(dir);
       if (!mounted) return;
       setState(() {
@@ -407,12 +463,13 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
           fromUser: false, isNotice: true,
         ));
       });
+      await _refreshUncommitted();
     } catch (e) {
       if (!mounted) return;
       setState(() {
         item.handled = false; // the write failed, so let them try again
         _append(_TextItem(
-          'Could not write ${item.proposal.path}: $e',
+          'Could not write ${proposal.path}: $e',
           fromUser: false, isNotice: true,
         ));
       });
@@ -423,10 +480,17 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     setState(() {
       item.handled = true;
       _append(_TextItem(
-        'Cancelled — ${item.proposal.path} was not written.',
+        'Cancelled — ${item.pathController.text.trim()} was not written.',
         fromUser: false, isNotice: true,
       ));
     });
+  }
+
+  /// Chat notices from the file flows. Never a plain _TextItem: isNotice keeps
+  /// every one of these out of the prompt transcript.
+  void _appendNotice(String text) {
+    if (!mounted) return;
+    setState(() => _append(_TextItem(text, fromUser: false, isNotice: true)));
   }
 
   String _buildPrompt() {
@@ -685,6 +749,9 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
       _appendGit('$label failed:\n${redactSecrets('$e', token: token)}');
     } finally {
       if (mounted) setState(() => _gitBusy = false);
+      // Covers Commit & push and Pull. ponytail: the read-only chips refresh
+      // too — one git status is cheaper than threading this through each.
+      await _refreshUncommitted();
     }
   }
 
@@ -790,6 +857,214 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     } finally {
       controller.dispose();
     }
+  }
+
+  // ---------------------------------------------------------------------
+  // Uncommitted changes bar. Same deal as the chips: pure local git and
+  // filesystem work, every result appended with isNotice: true.
+  // ---------------------------------------------------------------------
+
+  /// Re-reads the working tree. Called after anything that could change it —
+  /// a write, a save, a delete, a commit, a pull, a repo switch.
+  Future<void> _refreshUncommitted() async {
+    final dir = _activeRepoDir;
+    if (dir == null) {
+      if (mounted) setState(() => _uncommitted = const []);
+      return;
+    }
+    try {
+      final reposRoot = await getApplicationDocumentsDirectory();
+      final paths = await RepoGitService(reposRoot: reposRoot).uncommittedPaths(dir);
+      if (mounted) setState(() => _uncommitted = paths);
+    } catch (_) {
+      // ponytail: the bar just empties. A repo libgit2 cannot open makes the
+      // Status chip say so in full; a chat notice per refresh would be noise.
+      if (mounted) setState(() => _uncommitted = const []);
+    }
+  }
+
+  /// One chip per uncommitted file. Horizontally scrollable for the same
+  /// reason the git bar is: a narrow phone should scroll, not overflow.
+  /// Basenames only — the full path is in the tooltip and in the popup.
+  Widget _uncommittedBar() {
+    return SizedBox(
+      height: 46,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        child: Row(
+          children: [
+            Text('Uncommitted', style: appMono(size: 11, color: AppColors.muted)),
+            const SizedBox(width: 8),
+            for (final path in _uncommitted) ...[
+              Tooltip(
+                message: path,
+                child: appActionChip(
+                  icon: Icons.edit_note,
+                  label: path.split('/').last,
+                  onPressed: _gitBusy ? null : () => _openUncommittedFile(path),
+                ),
+              ),
+              const SizedBox(width: 8),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Edit-or-delete for one uncommitted file.
+  ///
+  /// A dialog rather than a bottom sheet: it is the same modal shape the
+  /// commit prompt already uses, and it sits centred above the keyboard —
+  /// a sheet holding a multi-line editor fights the keyboard for the bottom
+  /// of the screen.
+  ///
+  /// The content is read *before* the dialog opens, so a read failure is a
+  /// notice rather than an empty editor pretending the file is blank.
+  Future<void> _openUncommittedFile(String relativePath) async {
+    final dir = _activeRepoDir;
+    if (dir == null) return;
+    final file = File('${dir.path}/$relativePath');
+    final String content;
+    try {
+      content = await file.readAsString();
+    } catch (e) {
+      _appendNotice('Could not read $relativePath: $e');
+      return;
+    }
+    if (!mounted) return;
+
+    final controller = TextEditingController(text: content);
+    try {
+      final action = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.bg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: AppColors.fg, width: 2),
+          ),
+          title: Text('Edit file', style: appHeading(size: 16)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(relativePath, style: appMono(size: 12)),
+              const SizedBox(height: 10),
+              // maxLines caps the height and lets the field scroll inside it,
+              // so a 2000-line file cannot push the buttons off screen.
+              appBorderedField(controller: controller, hint: 'File content', maxLines: 10),
+              const SizedBox(height: 10),
+              appActionChip(
+                icon: Icons.delete_outline,
+                label: 'Delete file',
+                onPressed: () => Navigator.of(ctx).pop('delete'),
+              ),
+            ],
+          ),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          actions: [
+            Row(
+              children: [
+                // Full-width SizedBoxes: unwrapped in a Row they blow the
+                // frame's constraints.
+                Expanded(
+                  child: appSecondaryButton(
+                    label: 'Cancel',
+                    onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: appPrimaryButton(
+                    label: 'Save',
+                    onPressed: () => Navigator.of(ctx).pop('save'),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+
+      if (action == 'save') {
+        try {
+          await file.writeAsString(controller.text);
+          _appendNotice('Saved $relativePath — local clone only.');
+        } catch (e) {
+          _appendNotice('Could not save $relativePath: $e');
+        }
+        await _refreshUncommitted();
+      } else if (action == 'delete') {
+        await _deleteUncommittedFile(relativePath, file);
+      }
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  /// Deleting destroys work that is not committed anywhere, so it always
+  /// stops for a yes first.
+  Future<void> _deleteUncommittedFile(String relativePath, File file) async {
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.bg,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: AppColors.fg, width: 2),
+        ),
+        title: Text('Delete this file?', style: appHeading(size: 16)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(relativePath, style: appMono(size: 12)),
+            const SizedBox(height: 8),
+            Text(
+              'It has not been committed, so this cannot be undone from here.',
+              style: appBody(size: 12.5, color: AppColors.muted),
+            ),
+          ],
+        ),
+        actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        actions: [
+          Row(
+            children: [
+              Expanded(
+                child: appSecondaryButton(
+                  label: 'Keep',
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: appPrimaryButton(
+                  label: 'Delete',
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+
+    try {
+      await file.delete();
+      _appendNotice('Deleted $relativePath from the local clone.');
+    } catch (e) {
+      _appendNotice('Could not delete $relativePath: $e');
+    }
+    await _refreshUncommitted();
+    // The tree the browser and the prompt use still lists the file.
+    final dir = _activeRepoDir;
+    if (dir == null) return;
+    final tree = await buildFileTree(dir);
+    if (mounted) setState(() => _fileTree = tree);
   }
 
   /// Horizontally scrollable so a narrow phone shrinks the row rather than
@@ -993,64 +1268,91 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
             ],
           ),
         ),
-      _FileProposalItem() => Container(
-          margin: const EdgeInsets.symmetric(vertical: 4),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            border: Border.all(color: AppColors.fg, width: 2),
-            borderRadius: BorderRadius.circular(12),
+      _FileProposalItem() => _proposalCard(item),
+    };
+  }
+
+  /// The confirmation card. Both fields are live: what is in them when
+  /// Create is pressed is what lands on disk. The path is validated on every
+  /// keystroke by the same [filePathRejection] the parser uses, and Create is
+  /// dead while it fails.
+  Widget _proposalCard(_FileProposalItem item) {
+    final typedPath = item.pathController.text.trim();
+    final pathError = filePathRejection(typedPath);
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(color: AppColors.fg, width: 2),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            item.exists ? 'Overwrite this file?' : 'Create this file?',
+            style: appBody(size: 13.5, weight: FontWeight.w600),
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                item.exists ? 'Overwrite this file?' : 'Create this file?',
-                style: appBody(size: 13.5, weight: FontWeight.w600),
+          const SizedBox(height: 2),
+          Text(
+            'Edit the path or the content before writing.',
+            style: appBody(size: 12, color: AppColors.muted),
+          ),
+          const SizedBox(height: 8),
+          appBorderedField(
+            controller: item.pathController,
+            hint: 'path/in/repo.md',
+            enabled: !item.handled,
+            onChanged: (_) => _proposalPathChanged(item),
+          ),
+          if (pathError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text('Cannot write that path — $pathError.', style: appBody(size: 12)),
+            )
+          else if (item.exists)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                'A file is already there — writing replaces it.',
+                style: appBody(size: 12, color: AppColors.muted),
               ),
-              const SizedBox(height: 6),
-              Text(item.proposal.path, style: appMono(size: 12.5, weight: FontWeight.w600)),
-              if (item.exists)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
-                  child: Text(
-                    'A file is already there — writing replaces it.',
-                    style: appBody(size: 12, color: AppColors.muted),
+            ),
+          const SizedBox(height: 8),
+          // maxLines caps the height and scrolls inside it, so a long file
+          // cannot stretch the card off the screen.
+          appBorderedField(
+            controller: item.contentController,
+            hint: 'File content',
+            maxLines: 8,
+            enabled: !item.handled,
+          ),
+          const SizedBox(height: 8),
+          if (item.handled)
+            Text('Done.', style: appBody(size: 12, color: AppColors.muted))
+          else
+            // appPrimaryButton/appSecondaryButton are full-width SizedBoxes:
+            // unwrapped in a Row they blow the frame's constraints.
+            Row(
+              children: [
+                Expanded(
+                  child: appSecondaryButton(
+                    label: 'Cancel',
+                    onPressed: () => _cancelProposal(item),
                   ),
                 ),
-              const SizedBox(height: 8),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(8),
-                color: AppColors.surfaceMuted,
-                child: Text(proposalPreview(item.proposal.content), style: appMono(size: 11)),
-              ),
-              const SizedBox(height: 8),
-              if (item.handled)
-                Text('Done.', style: appBody(size: 12, color: AppColors.muted))
-              else
-                // appPrimaryButton/appSecondaryButton are full-width SizedBoxes:
-                // unwrapped in a Row they blow the frame's constraints.
-                Row(
-                  children: [
-                    Expanded(
-                      child: appSecondaryButton(
-                        label: 'Cancel',
-                        onPressed: () => _cancelProposal(item),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: appPrimaryButton(
-                        label: item.exists ? 'Overwrite' : 'Create',
-                        onPressed: () => _writeProposal(item),
-                      ),
-                    ),
-                  ],
+                const SizedBox(width: 8),
+                Expanded(
+                  child: appPrimaryButton(
+                    label: item.exists ? 'Overwrite' : 'Create',
+                    onPressed: pathError == null ? () => _writeProposal(item) : null,
+                  ),
                 ),
-            ],
-          ),
-        ),
-    };
+              ],
+            ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -1117,6 +1419,9 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
                   ],
                 ),
               ),
+            // Above the git bar: what would be committed, then the thing that
+            // commits it. Hidden entirely when the tree is clean.
+            if (_activeRepoDir != null && _uncommitted.isNotEmpty) _uncommittedBar(),
             if (_activeRepoDir != null) _gitActionsBar(),
             if (_pinned != null) _pinnedChip(_pinned!),
             Padding(

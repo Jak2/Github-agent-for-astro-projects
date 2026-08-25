@@ -83,4 +83,38 @@ C
       expect(r.proposals.single.path, 'cat/dog.md');
     });
   });
+
+  // The confirmation card lets the user retype the path, so these rules have
+  // to hold for a hand-typed path exactly as they do for the model's.
+  group('filePathRejection', () {
+    test('accepts an ordinary repo-relative path', () {
+      expect(filePathRejection('cat/dog_food.md'), isNull);
+    });
+
+    test('rejects a leading slash', () {
+      expect(filePathRejection('/etc/passwd'), isNotNull);
+    });
+
+    test('rejects a windows drive letter', () {
+      expect(filePathRejection(r'C:\temp\x.md'), isNotNull);
+    });
+
+    test('rejects ..', () {
+      expect(filePathRejection('../outside.md'), isNotNull);
+      expect(filePathRejection('cat/../../etc/passwd'), isNotNull);
+    });
+
+    test('rejects anything inside .git', () {
+      expect(filePathRejection('.git/config'), isNotNull);
+    });
+
+    test('rejects an empty path and a directory', () {
+      expect(filePathRejection(''), isNotNull);
+      expect(filePathRejection('cat/'), isNotNull);
+    });
+
+    test('normaliseFilePath drops . and empty segments', () {
+      expect(normaliseFilePath('./cat//dog.md'), 'cat/dog.md');
+    });
+  });
 }

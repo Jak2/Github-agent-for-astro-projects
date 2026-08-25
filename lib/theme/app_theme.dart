@@ -44,6 +44,7 @@ Widget appBorderedField({
   int maxLines = 1,
   TextInputType? keyboardType,
   bool enabled = true,
+  ValueChanged<String>? onChanged,
 }) {
   return TextField(
     controller: controller,
@@ -51,6 +52,7 @@ Widget appBorderedField({
     maxLines: maxLines,
     keyboardType: keyboardType,
     enabled: enabled,
+    onChanged: onChanged,
     style: appMono(size: 13),
     decoration: InputDecoration(
       hintText: hint,
