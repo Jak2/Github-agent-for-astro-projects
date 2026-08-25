@@ -98,4 +98,10 @@ void main() {
     expect(ctx.treeText, contains('README.md'));
     expect(ctx.header, isNot(contains('pinned')));
   });
+
+  test('the header says out loud that claiming a write is not a write', () {
+    final header = build(null).header;
+    expect(header, contains('does not create it'));
+    expect(header, contains('exact filename'));
+  });
 }

@@ -34,6 +34,8 @@ import 'pinned_scope.dart';
     ..writeln('```create-file path=folder/name.md')
     ..writeln('file content')
     ..writeln('```')
+    ..writeln('Saying a file was created does not create it. Only that block does.')
+    ..writeln('Use the exact filename the user asked for.')
     ..writeln('The path must be inside the repository. '
         'The user is asked to confirm before anything is written.');
   if (scope?.kind == PinKind.folder) {

@@ -117,4 +117,44 @@ C
       expect(normaliseFilePath('./cat//dog.md'), 'cat/dog.md');
     });
   });
+
+  group('claimsFileCreation', () {
+    test('catches the exact hallucination seen on device', () {
+      expect(
+        claimsFileCreation('File "food.md" has been created successfully.'),
+        isTrue,
+      );
+    });
+
+    test('catches the common first-person phrasings', () {
+      for (final reply in [
+        "I've created dog.md for you.",
+        'I have added the file to the cat folder.',
+        'I created dog.md.',
+        'The file was written to cat/dog.md.',
+        'Successfully created dog.md!',
+        'file created',
+      ]) {
+        expect(claimsFileCreation(reply), isTrue, reason: reply);
+      }
+    });
+
+    test('ordinary answers are not claims', () {
+      for (final reply in [
+        'The cat folder contains food.md and toys.md.',
+        'Do you want me to create dog.md?',
+        'To create a file, use the create-file block.',
+      ]) {
+        expect(claimsFileCreation(reply), isFalse, reason: reply);
+      }
+    });
+
+    test('a reply that actually proposes a file still parses', () {
+      // The notice is only ever shown when parsing found nothing, so a reply
+      // that both claims and proposes must keep proposing.
+      const reply = 'I have created the file.\n'
+          '```create-file path=cat/dog.md\nhi\n```';
+      expect(parseFileProposals(reply).proposals.single.path, 'cat/dog.md');
+    });
+  });
 }

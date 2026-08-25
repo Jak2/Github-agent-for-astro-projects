@@ -41,4 +41,73 @@ void main() {
     expect(repos, hasLength(1));
     expect(repos[0].fullName, 'jak2/valid');
   });
+
+  group('accessVerdictLines', () {
+    List<String> verdict({
+      int userStatus = 200,
+      String? scopesHeader,
+      int repoStatus = 200,
+      bool? pushPermission,
+    }) =>
+        accessVerdictLines(
+          repoFullName: 'jak2/git_agent_app',
+          userStatus: userStatus,
+          scopesHeader: scopesHeader,
+          repoStatus: repoStatus,
+          pushPermission: pushPermission,
+        );
+
+    test('a rejected token stops at the token and says to replace it', () {
+      final lines = verdict(userStatus: 401);
+      expect(lines.first, contains('REJECTED'));
+      expect(lines.first, contains('401'));
+      expect(lines.join('\n'), contains('expired'));
+      // Nothing about the repo can be trusted once the token is dead.
+      expect(lines.join('\n'), isNot(contains('Push to')));
+    });
+
+    test('an empty scopes header means fine-grained, not "no permissions"', () {
+      final lines = verdict(scopesHeader: '', pushPermission: true).join('\n');
+      expect(lines, contains('fine-grained'));
+      expect(lines, isNot(contains('Scopes: none reported — this is a classic')));
+    });
+
+    test('a classic token reports its scopes verbatim', () {
+      final lines = verdict(scopesHeader: 'repo, gist', pushPermission: true).join('\n');
+      expect(lines, contains('Scopes: repo, gist'));
+      expect(lines, isNot(contains('fine-grained')));
+    });
+
+    test('push granted reads as granted and offers no fix', () {
+      final lines = verdict(scopesHeader: 'repo', pushPermission: true).join('\n');
+      expect(lines, contains('Token: valid'));
+      expect(lines, contains('Push to jak2/git_agent_app: GRANTED.'));
+      expect(lines, isNot(contains('Fix:')));
+    });
+
+    test('push denied names both PAT fixes', () {
+      final lines = verdict(scopesHeader: 'gist', pushPermission: false).join('\n');
+      expect(lines, contains('DENIED'));
+      expect(lines, contains('"repo" scope'));
+      expect(lines, contains('Contents: Read and write'));
+    });
+
+    test('a 404 on the repo is invisibility, not absence of push rights', () {
+      final lines = verdict(scopesHeader: '', repoStatus: 404).join('\n');
+      expect(lines, contains('not visible to this token'));
+      expect(lines, contains('404'));
+      expect(lines, contains('Fix:'));
+    });
+
+    test('a missing permissions block says so rather than guessing', () {
+      final lines = verdict(scopesHeader: 'repo').join('\n');
+      expect(lines, contains('not reported by GitHub'));
+    });
+
+    test('no verdict line can ever carry the token', () {
+      final lines = verdict(scopesHeader: 'repo', pushPermission: false).join('\n');
+      expect(lines, isNot(contains('ghp_')));
+      expect(lines, isNot(contains('Bearer')));
+    });
+  });
 }

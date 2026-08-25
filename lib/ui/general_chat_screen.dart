@@ -2,6 +2,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,6 +19,7 @@ import '../engine/on_device_llama_engine.dart' show kMaxPromptChars;
 import '../files/file_tree.dart';
 import '../git/repo_git_service.dart';
 import '../git/repo_paths.dart';
+import '../github/github_api.dart';
 import '../github/github_repo.dart';
 import '../github/repo_browser_service.dart';
 import '../secrets/secret_store.dart';
@@ -381,7 +383,19 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
   /// confirmation cards. Nothing is written here — the user has not said yes yet.
   Future<void> _offerProposals(String reply) async {
     final result = parseFileProposals(reply);
-    if (result.isEmpty) return;
+    if (result.isEmpty) {
+      // The 1-1.5B models say "File food.md has been created successfully."
+      // and emit no block at all. Silence here leaves the user believing in a
+      // file that was never written, so contradict it out loud.
+      if (claimsFileCreation(reply)) {
+        _appendNotice(
+          'No file was created. The assistant only produced text — it did not '
+          'use the create-file block the app needs, so nothing was written to '
+          'disk. Use the "New file" button below to create one yourself.',
+        );
+      }
+      return;
+    }
     final dir = _activeRepoDir;
 
     final newItems = <_ChatItem>[
@@ -746,7 +760,11 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
       // message is already written for a human.
       _appendGit('$label\n${redactSecrets(e.message, token: token)}');
     } catch (e) {
-      _appendGit('$label failed:\n${redactSecrets('$e', token: token)}');
+      // Lead with what the user can do about it; never instead of the real
+      // error, which still follows verbatim (minus anything token-shaped).
+      final raw = redactSecrets('$e', token: token);
+      final help = githubAuthHelp(raw);
+      _appendGit(help == null ? '$label failed:\n$raw' : '$label failed:\n$help\n\n$raw');
     } finally {
       if (mounted) setState(() => _gitBusy = false);
       // Covers Commit & push and Pull. ponytail: the read-only chips refresh
@@ -791,6 +809,31 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         ),
       ],
     );
+  }
+
+  /// Answers the "why did that push 403?" question definitively, over the
+  /// REST API — libgit2 only ever reports the status code. Routed through
+  /// [_runGitAction] for its busy flag and its redacting error funnel.
+  Future<void> _gitCheckAccess() => _runGitAction(
+        'Check access',
+        (service, dir, token) => GithubApi(client: Dio(), token: _requireToken(token))
+            .checkAccess(_requireRepo().fullName),
+      );
+
+  /// A blank confirmation card, straight from a button. Same fields, same
+  /// validator, same write path as the model's proposal — with no model in it.
+  /// This is the path that works when the model will not follow the protocol.
+  void _newFile() {
+    if (_activeRepoDir == null) return;
+    setState(() => _append(
+          _FileProposalItem(const FileProposal(path: '', content: ''), exists: false),
+        ));
+  }
+
+  GithubRepo _requireRepo() {
+    final repo = _activeRepo;
+    if (repo == null) throw StateError('No repository selected.');
+    return repo;
   }
 
   Future<void> _gitPull() => _runGitAction(
@@ -1095,6 +1138,18 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
               icon: Icons.call_split,
               label: 'Branches',
               onPressed: busy ? null : _gitBranches,
+            ),
+            const SizedBox(width: 8),
+            appActionChip(
+              icon: Icons.note_add_outlined,
+              label: 'New file',
+              onPressed: busy ? null : _newFile,
+            ),
+            const SizedBox(width: 8),
+            appActionChip(
+              icon: Icons.verified_user_outlined,
+              label: 'Check access',
+              onPressed: busy ? null : _gitCheckAccess,
             ),
             const SizedBox(width: 8),
             appActionChip(

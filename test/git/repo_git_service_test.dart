@@ -373,4 +373,40 @@ void main() {
       );
     });
   });
+
+  group('githubAuthHelp', () {
+    // The exact string a real device produced when the PAT lacked write scope.
+    const real403 =
+        'error: git_error_t.GIT_ERROR_HTTP: unexpected http status code: 403';
+
+    test('a 403 push names every cause and the Check access chip', () {
+      final help = githubAuthHelp(real403)!;
+      expect(help, contains('403'));
+      expect(help, contains('refused the write'));
+      expect(help, contains('"repo" scope'));
+      expect(help, contains('Contents: Read and write'));
+      expect(help, contains('expired'));
+      expect(help, contains('push access'));
+      expect(help, contains('Check access'));
+    });
+
+    test('a 401 is a rejected token, not a permission problem', () {
+      final help = githubAuthHelp(
+        'error: git_error_t.GIT_ERROR_HTTP: unexpected http status code: 401',
+      )!;
+      expect(help, contains('rejected the token'));
+      expect(help, contains('401'));
+    });
+
+    test('anything that is not an HTTP auth failure gets no help text', () {
+      expect(githubAuthHelp('Nothing to commit — working tree clean.'), isNull);
+      expect(githubAuthHelp('unexpected http status code: 500'), isNull);
+      // A bare number with no HTTP context must not trigger it.
+      expect(githubAuthHelp('403 files changed'), isNull);
+    });
+
+    test('help never invents a token into the output', () {
+      expect(githubAuthHelp(real403), isNot(contains('ghp_')));
+    });
+  });
 }

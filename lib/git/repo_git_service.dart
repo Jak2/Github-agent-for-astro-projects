@@ -400,3 +400,24 @@ String redactSecrets(String message, {String? token}) {
   }
   return out;
 }
+
+/// libgit2 reports a refused push as `unexpected http status code: 403`, which
+/// tells the user nothing they can act on. 401/403 from GitHub over HTTPS is
+/// almost never a bug in this app — it is the token — so name the four causes
+/// and the fix. Returns null for anything that is not an HTTP auth failure;
+/// the caller still shows the raw error either way.
+String? githubAuthHelp(String message) {
+  final match = RegExp(r'http.*?\b(401|403)\b', caseSensitive: false, dotAll: true)
+      .firstMatch(message);
+  if (match == null) return null;
+  final code = match.group(1)!;
+  final refused = code == '401'
+      ? 'GitHub rejected the token (HTTP 401) — it is invalid, revoked, or expired.'
+      : 'GitHub accepted the token but refused the write (HTTP 403).';
+  return '$refused\nLikely causes:\n'
+      '  - a classic PAT without the "repo" scope\n'
+      '  - a fine-grained PAT without Contents: Read and write on this repository\n'
+      '  - the token has expired\n'
+      '  - the account has no push access to this repository\n'
+      'Tap "Check access" to see which one it is.';
+}

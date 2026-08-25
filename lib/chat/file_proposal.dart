@@ -113,3 +113,20 @@ String? filePathRejection(String path) {
 /// [filePathRejection] has already cleared.
 String normaliseFilePath(String path) =>
     path.split('/').where((s) => s.isNotEmpty && s != '.').join('/');
+
+/// The phrasings a small model uses when it *claims* to have created a file.
+///
+/// Only ever consulted when [parseFileProposals] found nothing at all, so a
+/// false positive costs one clarifying line while a false negative leaves the
+/// user believing in a file that does not exist. Erring loud is the cheap side.
+final _creationClaim = RegExp(
+  r"(has|have|had) been (created|written|added|saved)"
+  r"|\bfile (is |was )?(created|written|added|saved)"
+  r"|successfully (created|written|added|saved)"
+  r"|\bi(?:'ve| have)?\s+(?:just\s+|now\s+)?(?:created|written|added|saved)\b",
+  caseSensitive: false,
+);
+
+/// True when [reply] reads as "I created that file" — a claim only the
+/// create-file block can actually make true.
+bool claimsFileCreation(String reply) => _creationClaim.hasMatch(reply);
