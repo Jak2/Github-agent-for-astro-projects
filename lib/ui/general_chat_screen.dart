@@ -17,6 +17,7 @@ import '../github/github_repo.dart';
 import '../github/repo_browser_service.dart';
 import '../secrets/secret_store.dart';
 import '../settings/engine_settings.dart';
+import '../system/device_metrics.dart';
 import '../theme/app_theme.dart';
 
 sealed class _ChatItem {
@@ -77,18 +78,50 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
   String? _openFileContent;
   String? _cloningFullName;
 
+  /// Directories the user has unfolded, by relativePath. Display state only —
+  /// renderFileTreeAsText still hands the LLM the whole tree.
+  final Set<String> _expandedDirs = {};
+
+  final _metrics = DeviceMetrics();
+  DeviceSnapshot? _snapshot;
+  AppLifecycleListener? _lifecycle;
+
   @override
   void initState() {
     super.initState();
     _initEngine();
+    _metrics.start(_onMetrics);
+    // Stop polling while the app is backgrounded. ponytail: tab switches are
+    // not covered — RootScreen keeps every tab alive in an IndexedStack, so
+    // there is no visibility signal here without plumbing one through it, and
+    // one /proc read per 1.5s is not what drains a phone.
+    _lifecycle = AppLifecycleListener(
+      onPause: _metrics.stop,
+      onResume: () => _metrics.start(_onMetrics),
+    );
   }
 
   @override
   void dispose() {
+    _metrics.stop();
+    _lifecycle?.dispose();
     _genSub?.cancel();
     _scrollController.dispose();
     _inputController.dispose();
     super.dispose();
+  }
+
+  void _onMetrics(DeviceSnapshot? snapshot) {
+    if (mounted) setState(() => _snapshot = snapshot);
+  }
+
+  /// Every insertion into the chat list goes through here, so whatever an
+  /// action produced — a reply, a repo list, a file tree — is scrolled into
+  /// view. Uniform by construction rather than special-cased per action.
+  /// Call inside setState; the scroll runs after the frame that lays it out.
+  void _append(_ChatItem item) {
+    _items.add(item);
+    _scrollToBottom();
   }
 
   void _scrollToBottom() {
@@ -115,7 +148,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     if (!mounted) return;
     if (engine == null) {
       setState(() {
-        _items.add(_TextItem(
+        _append(_TextItem(
           'No LLM configured. Go to Config and set up a Cloud API or On-device engine first.',
           fromUser: false,
         ));
@@ -130,17 +163,17 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
       final result = await loadReposWithCloneStatus(secretStore: widget.secretStore, reposRoot: reposRoot);
       if (!mounted) return;
       setState(() {
-        _items.add(_RepoListItem(repos: result.repos, alreadyClonedFullNames: result.alreadyClonedFullNames));
+        _append(_RepoListItem(repos: result.repos, alreadyClonedFullNames: result.alreadyClonedFullNames));
       });
     } on NoGithubTokenException {
       if (mounted) {
-        setState(() => _items.add(_TextItem(
+        setState(() => _append(_TextItem(
               'Add a GitHub Personal Access Token in Config first.',
               fromUser: false,
             )));
       }
     } catch (e) {
-      if (mounted) setState(() => _items.add(_TextItem('Failed to load repos: $e', fromUser: false)));
+      if (mounted) setState(() => _append(_TextItem('Failed to load repos: $e', fromUser: false)));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -156,7 +189,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         final token = await widget.secretStore.read(secretKeyGithubPat);
         if (token == null) {
           if (mounted) {
-            setState(() => _items.add(_TextItem(
+            setState(() => _append(_TextItem(
                   'GitHub Personal Access Token missing. Add one in Config.',
                   fromUser: false,
                 )));
@@ -174,10 +207,11 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         _fileTree = tree;
         _openFilePath = null;
         _openFileContent = null;
-        _items.add(_TextItem('Repo selected: ${repo.fullName}', fromUser: false));
+        _expandedDirs.clear(); // paths belonged to the previous repo
+        _append(_TextItem('Repo selected: ${repo.fullName}', fromUser: false));
       });
     } catch (e) {
-      if (mounted) setState(() => _items.add(_TextItem('Failed to open repo: $e', fromUser: false)));
+      if (mounted) setState(() => _append(_TextItem('Failed to open repo: $e', fromUser: false)));
     } finally {
       if (mounted) setState(() => _cloningFullName = null);
     }
@@ -186,11 +220,11 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
   void _browseFiles() {
     final tree = _fileTree;
     if (tree == null) return;
-    setState(() => _items.add(_FileListItem(tree)));
+    setState(() => _append(_FileListItem(tree)));
   }
 
   void _tapFile(String relativePath) {
-    setState(() => _items.add(_FileActionsItem(relativePath)));
+    setState(() => _append(_FileActionsItem(relativePath)));
   }
 
   Future<void> _askAboutFile(String relativePath) async {
@@ -202,10 +236,10 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
       setState(() {
         _openFilePath = relativePath;
         _openFileContent = content;
-        _items.add(_TextItem('Opened $relativePath — ask me anything about it.', fromUser: false));
+        _append(_TextItem('Opened $relativePath — ask me anything about it.', fromUser: false));
       });
     } catch (e) {
-      if (mounted) setState(() => _items.add(_TextItem('Could not read file: $e', fromUser: false)));
+      if (mounted) setState(() => _append(_TextItem('Could not read file: $e', fromUser: false)));
     }
   }
 
@@ -223,7 +257,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
       );
       widget.onSwitchTab(1);
     } catch (e) {
-      if (mounted) setState(() => _items.add(_TextItem('Could not read file: $e', fromUser: false)));
+      if (mounted) setState(() => _append(_TextItem('Could not read file: $e', fromUser: false)));
     }
   }
 
@@ -271,12 +305,12 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     final text = _inputController.text.trim();
     if (text.isEmpty) return;
     _inputController.clear();
-    setState(() => _items.add(_TextItem(text, fromUser: true)));
+    setState(() => _append(_TextItem(text, fromUser: true)));
 
     final engine = await _resolveEngine();
     if (!mounted) return;
     if (engine == null) {
-      setState(() => _items.add(_TextItem(
+      setState(() => _append(_TextItem(
             'No LLM configured. Go to Config and set up a Cloud API or On-device engine first.',
             fromUser: false,
           )));
@@ -291,7 +325,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
       _busy = true;
       _statusLine = 'starting…';
       _streamingReply = reply;
-      _items.add(reply);
+      _append(reply);
     });
 
     final buffer = StringBuffer();
@@ -353,29 +387,70 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     }
   }
 
+  void _toggleDir(String relativePath) {
+    setState(() {
+      if (!_expandedDirs.remove(relativePath)) _expandedDirs.add(relativePath);
+    });
+  }
+
+  /// Folders start collapsed — every one of them, at every depth. A real repo
+  /// tree is hundreds of rows fully expanded, which is what made this list
+  /// unusable; starting shut means one screenful of top-level entries and the
+  /// user opens only the branch they want.
   List<Widget> _fileTiles(FileTreeNode node, int depth) {
     final tiles = <Widget>[];
     for (final child in node.children) {
+      final expanded = child.isDirectory && _expandedDirs.contains(child.relativePath);
       tiles.add(InkWell(
-        onTap: child.isDirectory ? null : () => _tapFile(child.relativePath),
+        onTap: child.isDirectory ? () => _toggleDir(child.relativePath) : () => _tapFile(child.relativePath),
         child: Padding(
           padding: EdgeInsets.fromLTRB(12 + depth * 16.0, 8, 12, 8),
           child: Row(
             children: [
+              // Files keep the same left edge as their sibling folders.
+              SizedBox(
+                width: 15,
+                child: child.isDirectory
+                    ? Icon(
+                        expanded ? Icons.expand_more : Icons.chevron_right,
+                        size: 15,
+                        color: AppColors.fg,
+                      )
+                    : null,
+              ),
+              const SizedBox(width: 4),
               Icon(
                 child.isDirectory ? Icons.folder_outlined : Icons.description_outlined,
                 size: 15,
                 color: child.isDirectory ? AppColors.fg : AppColors.muted,
               ),
               const SizedBox(width: 8),
-              Text(child.name, style: appMono(size: 12)),
+              Expanded(
+                child: Text(child.name, style: appMono(size: 12), overflow: TextOverflow.ellipsis),
+              ),
             ],
           ),
         ),
       ));
-      if (child.isDirectory) tiles.addAll(_fileTiles(child, depth + 1));
+      if (expanded) tiles.addAll(_fileTiles(child, depth + 1));
     }
     return tiles;
+  }
+
+  /// This app's own CPU and RAM. An em-dash means the reading was unavailable
+  /// — never the last good value dressed up as live.
+  Widget _metricsReadout() {
+    final cpu = _snapshot?.cpuPercent;
+    final rssKb = _snapshot?.rssKb;
+    final style = appMono(size: 11, color: AppColors.muted);
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        Text('CPU ${cpu == null ? '—' : '${cpu.round()}%'}', style: style),
+        Text('RAM ${rssKb == null ? '—' : '${(rssKb / 1024).round()}MB'}', style: style),
+      ],
+    );
   }
 
   Widget _buildItem(_ChatItem item) {
@@ -476,7 +551,15 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
               child: Row(
                 children: [
                   const SizedBox(width: 16),
-                  Expanded(child: Text('Assistant', style: appHeading(size: 17, weight: FontWeight.w700))),
+                  Expanded(
+                    child: Text(
+                      'Assistant',
+                      style: appHeading(size: 17, weight: FontWeight.w700),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  _metricsReadout(),
+                  const SizedBox(width: 10),
                   appIconCircleButton(icon: Icons.hub_outlined, onPressed: _busy ? null : _browseRepos),
                   const SizedBox(width: 8),
                   appIconCircleButton(
