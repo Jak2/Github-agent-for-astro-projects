@@ -1,5 +1,6 @@
 // lib/theme/app_theme.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 class AppColors {
@@ -109,6 +110,46 @@ Widget appSecondaryButton({required String label, required VoidCallback? onPress
       ),
       child: Text(label, style: appBody(size: 14, weight: FontWeight.w600)),
     ),
+  );
+}
+
+/// `◀   3   ▶   Label` — a bounded integer stepper.
+///
+/// The arrows are *disabled* at [min]/[max] rather than silently ignoring the
+/// press, so the bound is visible instead of feeling broken. Each accepted
+/// press fires a selection haptic.
+Widget appStepper({
+  required String label,
+  required int value,
+  required int min,
+  required int max,
+  required ValueChanged<int> onChanged,
+}) {
+  void step(int delta) {
+    HapticFeedback.selectionClick();
+    onChanged(value + delta);
+  }
+
+  return Row(
+    children: [
+      Expanded(child: Text(label, style: appBody(size: 13.5))),
+      appIconCircleButton(
+        icon: Icons.chevron_left,
+        onPressed: value <= min ? null : () => step(-1),
+      ),
+      SizedBox(
+        width: 44,
+        child: Text(
+          '$value',
+          textAlign: TextAlign.center,
+          style: appMono(size: 16, weight: FontWeight.w700),
+        ),
+      ),
+      appIconCircleButton(
+        icon: Icons.chevron_right,
+        onPressed: value >= max ? null : () => step(1),
+      ),
+    ],
   );
 }
 

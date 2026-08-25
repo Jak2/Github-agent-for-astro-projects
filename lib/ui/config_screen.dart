@@ -36,8 +36,6 @@ class _ConfigScreenState extends State<ConfigScreen> {
   List<InstructionEntry> _personas = [];
   AgentConfig _agentConfig = const AgentConfig();
   final _guardrailsController = TextEditingController();
-  bool _langchainEnabled = false;
-  bool _langgraphEnabled = false;
   bool _modelBusy = false;
   int _modelBusyElapsedSeconds = 0;
   Timer? _modelBusyTimer;
@@ -106,6 +104,14 @@ class _ConfigScreenState extends State<ConfigScreen> {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Settings saved')));
     }
+  }
+
+  /// Agent-framework switches persist on the spot rather than waiting for
+  /// Save, so a flipped toggle is never a promise the app has not kept.
+  Future<void> _saveAgentConfig(AgentConfig updated) async {
+    setState(() => _agentConfig = updated);
+    final prefs = await SharedPreferences.getInstance();
+    await updated.save(prefs);
   }
 
   Future<void> _showEntryEditor({
@@ -569,16 +575,39 @@ class _ConfigScreenState extends State<ConfigScreen> {
                 const SizedBox(height: 10),
                 _toggleRow(
                   title: 'LangChain',
-                  description: 'Chain prompts and tools for structuring',
-                  value: _langchainEnabled,
-                  onChanged: (v) => setState(() => _langchainEnabled = v),
+                  description: 'Real, and in this app: the langchain 0.8.1 Dart package, with an '
+                      'adapter (lib/engine/langchain_chat_model.dart) that wraps our cloud and '
+                      'on-device engines.\n'
+                      'Not wired into chat yet — turning this on saves the preference and does '
+                      'not change how replies are generated.',
+                  value: _agentConfig.langchainEnabled,
+                  onChanged: (v) => _saveAgentConfig(_agentConfig.copyWith(langchainEnabled: v)),
                 ),
                 _toggleRow(
-                  title: 'LangGraph',
-                  description: 'Multi-step agent orchestration',
-                  value: _langgraphEnabled,
-                  onChanged: (v) => setState(() => _langgraphEnabled = v),
+                  title: 'Graph orchestration',
+                  description: "This app's own graph engine (lib/agent/graph_engine.dart): nodes, "
+                      'edges, cycles and shared state, running on the device.\n'
+                      'This is NOT LangGraph. No Dart LangGraph engine exists — the only package '
+                      'is an HTTP client for a hosted LangGraph server, which this app does not run.',
+                  value: _agentConfig.graphOrchestrationEnabled,
+                  onChanged: (v) =>
+                      _saveAgentConfig(_agentConfig.copyWith(graphOrchestrationEnabled: v)),
                 ),
+                if (_agentConfig.graphOrchestrationEnabled) ...[
+                  const SizedBox(height: 4),
+                  appStepper(
+                    label: 'Max reasoning loops',
+                    value: _agentConfig.maxSteps,
+                    min: AgentConfig.stepsMin,
+                    max: AgentConfig.stepsMax,
+                    onChanged: (v) => _saveAgentConfig(_agentConfig.copyWith(maxSteps: v)),
+                  ),
+                  Text(
+                    'A hard stop, not a hint: the graph run ends at this many steps. Higher costs '
+                    'proportionally more time and, on a cloud engine, more tokens.',
+                    style: appBody(size: 11.5, color: AppColors.muted),
+                  ),
+                ],
                 const SizedBox(height: 22),
 
                 Text('Structuring rules (structure.md)', style: appHeading(size: 14, weight: FontWeight.w700)),
