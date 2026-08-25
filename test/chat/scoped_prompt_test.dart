@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:git_agent_app/chat/file_proposal.dart';
 import 'package:git_agent_app/chat/pinned_scope.dart';
 import 'package:git_agent_app/chat/scoped_prompt.dart';
 import 'package:git_agent_app/files/file_tree.dart';
@@ -59,6 +60,34 @@ void main() {
     final ctx = build(const PinnedScope(kind: PinKind.file, path: 'cat/food.md', label: 'food.md'));
     expect(ctx.header, contains('pinned the file "cat/food.md"'));
     expect(ctx.treeText.trim(), 'cat/food.md');
+  });
+
+  test('every header teaches the create-file protocol and the confirm step', () {
+    final header = build(null).header;
+    expect(header, contains('```create-file path='));
+    expect(header, contains('inside the repository'));
+    expect(header, contains('confirm'));
+  });
+
+  test('the example block in the header is one the parser actually accepts', () {
+    // If these two ever drift apart, the model follows the instructions
+    // perfectly and the app still writes nothing.
+    final parsed = parseFileProposals(build(null).header);
+    expect(parsed.rejected, isEmpty);
+    expect(parsed.proposals.single.path, 'folder/name.md');
+  });
+
+  test('a folder pin tells the model to put new files in that folder', () {
+    final header = build(const PinnedScope(kind: PinKind.folder, path: 'cat', label: 'cat')).header;
+    expect(header, contains('Put new files inside "cat/"'));
+  });
+
+  test('with no folder pinned there is no default folder claim', () {
+    expect(build(null).header, isNot(contains('Put new files inside')));
+    expect(
+      build(const PinnedScope(kind: PinKind.file, path: 'cat/food.md', label: 'food.md')).header,
+      isNot(contains('Put new files inside')),
+    );
   });
 
   test('a stale pin falls back to the whole tree and reports it', () {

@@ -27,6 +27,18 @@ import 'pinned_scope.dart';
   if (scope != null) {
     header.writeln('The user has pinned ${scope.promptDescription}. Answer only about it.');
   }
+  // The protocol the app parses back out of the reply. Deliberately tiny: this
+  // is prepended to every prompt and on-device context is 4096 tokens.
+  header
+    ..writeln('To create or write a file, reply with a fenced block:')
+    ..writeln('```create-file path=folder/name.md')
+    ..writeln('file content')
+    ..writeln('```')
+    ..writeln('The path must be inside the repository. '
+        'The user is asked to confirm before anything is written.');
+  if (scope?.kind == PinKind.folder) {
+    header.writeln('Put new files inside "${scope!.path}/" unless told otherwise.');
+  }
   header.writeln('File and folder structure:');
 
   final treeText = switch (scope?.kind) {

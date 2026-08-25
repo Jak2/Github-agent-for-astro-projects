@@ -5,9 +5,11 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../chat/file_proposal.dart';
 import '../chat/pending_file_handoff.dart';
 import '../chat/pinned_scope.dart';
 import '../chat/prompt_budget.dart';
+import '../chat/proposal_writer.dart';
 import '../chat/scoped_prompt.dart';
 import '../engine/engine_factory.dart';
 import '../engine/generation_event.dart';
@@ -55,6 +57,21 @@ class _FileListItem extends _ChatItem {
 class _FileActionsItem extends _ChatItem {
   final String relativePath;
   _FileActionsItem(this.relativePath);
+}
+
+/// A file the model asked to create, awaiting the user's yes or no.
+///
+/// Not a [_TextItem], so it never reaches the prompt transcript.
+class _FileProposalItem extends _ChatItem {
+  final FileProposal proposal;
+
+  /// Checked once, when the card is offered: decides Create vs Overwrite.
+  final bool exists;
+
+  /// Set once the user has chosen, so the same write cannot be fired twice.
+  bool handled = false;
+
+  _FileProposalItem(this.proposal, {required this.exists});
 }
 
 class GeneralChatScreen extends StatefulWidget {
@@ -328,6 +345,82 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     }
   }
 
+  /// Turns whatever create-file blocks the finished reply contains into
+  /// confirmation cards. Nothing is written here — the user has not said yes yet.
+  Future<void> _offerProposals(String reply) async {
+    final result = parseFileProposals(reply);
+    if (result.isEmpty) return;
+    final dir = _activeRepoDir;
+
+    final newItems = <_ChatItem>[
+      // Never dropped silently: the user would sit waiting for a file that is
+      // never coming.
+      for (final r in result.rejected)
+        _TextItem(
+          'Ignored a proposed file "${r.rawPath}" — ${r.reason}.',
+          fromUser: false, isNotice: true,
+        ),
+    ];
+
+    if (result.proposals.isNotEmpty) {
+      if (dir == null) {
+        newItems.add(_TextItem(
+          'The assistant proposed ${result.proposals.length} file(s), but no repository '
+          'is selected. Pick one with the repo icon above, then ask again.',
+          fromUser: false, isNotice: true,
+        ));
+      } else {
+        for (final p in result.proposals) {
+          newItems.add(_FileProposalItem(p, exists: await proposalFile(dir, p).exists()));
+        }
+      }
+    }
+
+    if (!mounted) return;
+    setState(() {
+      for (final item in newItems) {
+        _append(item);
+      }
+    });
+  }
+
+  Future<void> _writeProposal(_FileProposalItem item) async {
+    final dir = _activeRepoDir;
+    if (dir == null) return; // a card is never offered without one
+    setState(() => item.handled = true);
+    try {
+      final file = await writeProposal(dir, item.proposal);
+      final tree = await buildFileTree(dir);
+      if (!mounted) return;
+      setState(() {
+        _fileTree = tree;
+        _append(_TextItem(
+          'Wrote ${file.path}\nLocal clone only — not committed or pushed.',
+          fromUser: false, isNotice: true,
+        ));
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        item.handled = false; // the write failed, so let them try again
+        _append(_TextItem(
+          'Could not write ${item.proposal.path}: $e',
+          fromUser: false, isNotice: true,
+        ));
+      });
+    }
+  }
+
+  void _cancelProposal(_FileProposalItem item) {
+    setState(() {
+      item.handled = true;
+      _append(_TextItem(
+        'Cancelled — ${item.proposal.path} was not written.',
+        fromUser: false, isNotice: true,
+      ));
+    });
+  }
+
   String _buildPrompt() {
     final repo = _activeRepo;
     final tree = _fileTree;
@@ -426,6 +519,9 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
               _statusLine = '';
           }
         });
+        // Only the finished text is parsed — a half-streamed fence would offer
+        // to write a truncated file.
+        if (event is GenerationDone) unawaited(_offerProposals(reply.text));
         _scrollToBottom();
       },
       onError: (Object e) {
@@ -692,6 +788,63 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
                   ),
                 ],
               ),
+            ],
+          ),
+        ),
+      _FileProposalItem() => Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            border: Border.all(color: AppColors.fg, width: 2),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                item.exists ? 'Overwrite this file?' : 'Create this file?',
+                style: appBody(size: 13.5, weight: FontWeight.w600),
+              ),
+              const SizedBox(height: 6),
+              Text(item.proposal.path, style: appMono(size: 12.5, weight: FontWeight.w600)),
+              if (item.exists)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    'A file is already there — writing replaces it.',
+                    style: appBody(size: 12, color: AppColors.muted),
+                  ),
+                ),
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(8),
+                color: AppColors.surfaceMuted,
+                child: Text(proposalPreview(item.proposal.content), style: appMono(size: 11)),
+              ),
+              const SizedBox(height: 8),
+              if (item.handled)
+                Text('Done.', style: appBody(size: 12, color: AppColors.muted))
+              else
+                // appPrimaryButton/appSecondaryButton are full-width SizedBoxes:
+                // unwrapped in a Row they blow the frame's constraints.
+                Row(
+                  children: [
+                    Expanded(
+                      child: appSecondaryButton(
+                        label: 'Cancel',
+                        onPressed: () => _cancelProposal(item),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: appPrimaryButton(
+                        label: item.exists ? 'Overwrite' : 'Create',
+                        onPressed: () => _writeProposal(item),
+                      ),
+                    ),
+                  ],
+                ),
             ],
           ),
         ),
