@@ -259,6 +259,11 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         buffer.writeln('${item.fromUser ? "User" : "Assistant"}: ${item.text}');
       }
     }
+    // Cue the model that it is the assistant's turn. Without this it continues
+    // the transcript instead of answering — inventing the next "User:" line and
+    // role-playing both sides. Pairs with kStopSequences in the on-device
+    // engine, which cuts generation if it starts a new turn anyway.
+    buffer.write('Assistant:');
     return buffer.toString();
   }
 

@@ -19,6 +19,37 @@ echo "==> pinning llama.cpp to $LLAMA_COMMIT"
 git -C "$PKG/src/llama.cpp" fetch --quiet origin || true
 git -C "$PKG/src/llama.cpp" checkout --quiet "$LLAMA_COMMIT"
 
+echo "==> forcing optimized native build"
+python3 - "$PKG" <<'PY'
+import sys, pathlib
+g = pathlib.Path(sys.argv[1]) / "android/build.gradle"
+s = g.read_text()
+if "-O3" in s:
+    print("   build.gradle already patched")
+else:
+    old = """        minSdkVersion 23
+        targetSdkVersion 31"""
+    new = """        minSdkVersion 23
+        targetSdkVersion 31
+
+        externalNativeBuild {
+            cmake {
+                // A debug APK builds native code with CMAKE_BUILD_TYPE=Debug,
+                // i.e. -O0. llama.cpp at -O0 runs roughly 10-30x slower: on a
+                // vivo V2231 that measured 0.43 tokens/sec for gemma-3-1b-Q4,
+                // which reads as "the app is frozen". These flags are appended
+                // after the build-type flags, and the last -O wins, so the
+                // inference library stays optimized in debug builds too.
+                cFlags "-O3", "-DNDEBUG"
+                cppFlags "-O3", "-DNDEBUG"
+            }
+        }"""
+    if old not in s:
+        raise SystemExit("build.gradle defaultConfig not found; package version changed?")
+    g.write_text(s.replace(old, new, 1))
+    print("   patched android/build.gradle with -O3")
+PY
+
 echo "==> patching Dart sources"
 python3 - "$PKG" <<'PY'
 import sys, pathlib

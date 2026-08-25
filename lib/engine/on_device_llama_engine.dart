@@ -4,6 +4,34 @@ import 'package:llama_cpp_dart/llama_cpp_dart.dart';
 import 'generation_event.dart';
 import 'llm_engine.dart';
 
+/// Markers that mean the model has stopped answering and started writing the
+/// rest of the transcript itself.
+///
+/// llama_cpp_dart 0.0.9 stops only on an end-of-generation token or the
+/// nPredict cap. A plain-text (non chat-templated) prompt rarely makes a model
+/// emit its EOG token, so without this it happily continues with
+/// "User: ...\nAssistant: ..." and role-plays both sides.
+const List<String> kStopSequences = ['\nUser:', '\nAssistant:', '\nSystem:'];
+
+final int _maxStopLength =
+    kStopSequences.map((s) => s.length).reduce((a, b) => a > b ? a : b);
+
+/// Index of the earliest stop marker in [text], or null if none is present.
+int? _firstStopIndex(String text) {
+  int? earliest;
+  for (final stop in kStopSequences) {
+    final i = text.indexOf(stop);
+    if (i >= 0 && (earliest == null || i < earliest)) earliest = i;
+  }
+  return earliest;
+}
+
+/// [text] truncated at the first stop marker and trimmed.
+String trimAtStop(String text) {
+  final i = _firstStopIndex(text);
+  return (i == null ? text : text.substring(0, i)).trim();
+}
+
 /// On-device engine backed by llama_cpp_dart's isolate-based LlamaParent.
 /// The package already runs inference in a child isolate, so this class
 /// just drives its prompt/stream API.
@@ -27,7 +55,11 @@ class OnDeviceLlamaEngine implements LlmEngine {
         // first time it tries to hand a layer to a GPU backend that isn't
         // there. Force CPU-only inference.
         modelParams: ModelParams()..nGpuLayers = 0,
-        contextParams: ContextParams(),
+        // Defaults are nPredict = 32 and nCtx = 512, which truncate a reply
+        // mid-sentence and leave no room for repo-tree context.
+        contextParams: ContextParams()
+          ..nPredict = 256
+          ..nCtx = 2048,
         samplingParams: SamplerParams(),
       ),
     );
@@ -79,15 +111,51 @@ class OnDeviceLlamaEngine implements LlmEngine {
       await parent.sendPrompt(prompt);
 
       var count = 0;
+      var emitted = 0;
+      var hitStop = false;
       final done = completion.whenComplete(tokens.close);
 
       await for (final token in tokens.stream) {
         buffer.write(token);
         count++;
-        yield GenerationToken(token);
+
+        final text = buffer.toString();
+        final stopAt = _firstStopIndex(text);
+
+        if (stopAt != null) {
+          // Emit only the text before the stop marker, then halt generation so
+          // the model doesn't keep burning CPU role-playing the user's turn.
+          if (stopAt > emitted) {
+            yield GenerationToken(text.substring(emitted, stopAt));
+            emitted = stopAt;
+          }
+          hitStop = true;
+          await parent.stop();
+          break;
+        }
+
+        // Hold back a tail that could still turn out to be the start of a stop
+        // marker, so a partial "\nUser" is never shown and then retracted.
+        final safeEnd = text.length - _maxStopLength;
+        if (safeEnd > emitted) {
+          yield GenerationToken(text.substring(emitted, safeEnd));
+          emitted = safeEnd;
+        }
+
         if (count % 8 == 0) {
           yield GenerationStatus('generating ($count tokens)');
         }
+      }
+
+      if (hitStop) {
+        yield GenerationDone(trimAtStop(buffer.toString()));
+        return;
+      }
+
+      // Flush whatever was held back for stop-marker detection.
+      final full = buffer.toString();
+      if (full.length > emitted) {
+        yield GenerationToken(full.substring(emitted));
       }
 
       final event = await done;
@@ -95,7 +163,7 @@ class OnDeviceLlamaEngine implements LlmEngine {
         yield GenerationError(event.errorDetails ?? 'Generation failed');
         return;
       }
-      yield GenerationDone(buffer.toString());
+      yield GenerationDone(trimAtStop(full));
     } catch (e) {
       yield GenerationError('$e');
     } finally {
