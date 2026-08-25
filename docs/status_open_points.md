@@ -71,6 +71,61 @@ Config's `OnDeviceEngineRegistry` instance; whether the folder tree is widgets
 or flat text; whether a prior agreed value exists for Phase 4's loop levels;
 `/proc/self` readability on the physical device.
 
+## Open points needing Jaya's input (raised 2026-08-25, autonomous session)
+
+### 1. Re-verify the stop-sequence fix on-device (ACTION, not a decision)
+
+**What:** The `-O3` performance fix was verified on the phone (0.43 → ~2.5
+tok/s, reply completing in 14s). The stop-sequence fix, the `Assistant:` prompt
+cue, and `nPredict` 32→256 / `nCtx` 512→2048 were committed *after* the device
+disconnected, so they are unit-tested (6 tests) but **not yet confirmed on
+hardware**.
+
+**Why it matters:** the whole point of this work is that runtime behaviour is
+the evidence, not passing tests.
+
+**To do:** plug the phone in, `bash android/gradlew assembleDebug`, install,
+load the model, ask "hello", and confirm the reply stops after one turn instead
+of inventing a `User:` line.
+
+### 2. On-device inference speed is still modest — accept or tune?
+
+**What:** after the `-O3` fix, gemma-3-1b-Q4 runs at ~2.5 tok/s on the vivo
+V2231. A ~30-word answer takes roughly 15–20 seconds.
+
+**Understanding:** `-O0` was the dominant cause and is fixed. The remaining
+rate is plausible for a 1B model on a mid-range CPU with no GPU backend
+compiled in, but it has not been tuned.
+
+**Options considered:**
+- *Accept as-is* — honest streaming UI already makes the wait legible.
+  Zero risk, no further work.
+- *Tune thread count* — `nThreads` is 8; the device is 6×2.0GHz + 2×2.8GHz.
+  Trying 4 and 6 is cheap and might give 10–30%. Needs the device to measure.
+- *Compile ARM dotprod/i8mm kernels* — PocketPal ships separate `.so` variants
+  per CPU feature level (`librnllama_v8_2_dotprod_i8mm.so`). Potentially a
+  large gain on quantised matmul, but means per-variant native builds and real
+  build-system work.
+- *Add a GPU backend (Vulkan)* — biggest potential gain, biggest risk; a GPU
+  backend was what caused the original SIGSEGV, and `nGpuLayers = 0` is
+  currently load-bearing.
+
+**Recommendation:** accept for now, and try the thread-count tuning next time
+the device is attached, since it is nearly free. Treat the dotprod/Vulkan work
+as its own project, not a tweak.
+
+### 3. Which cloud model should Phase 5 multi-step default to?
+
+**What:** the multi-step orchestrator is cloud-only by decision. Cost per run
+depends heavily on the model, and no default was chosen.
+
+**Why it matters:** it determines the default token budget and the realistic
+cost of a 5-step run.
+
+**Recommendation:** leave the model as whatever the active cloud entry uses,
+and make the token budget the safety mechanism rather than hard-coding a model.
+No action needed unless you disagree.
+
 ## Open points (deferred, not blocking v1)
 
 - Full OAuth device/web flow instead of PAT.

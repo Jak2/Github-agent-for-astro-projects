@@ -342,3 +342,40 @@ plus two upstream-bug patches so failures report themselves honestly. Applied by
 Verified on-device: qwen2.5-0.5B-instruct-q5_K_M loads in ~2.2s.
 Full analysis, including the eight ruled-out hypotheses, in
 `docs/on_device_load_hang_rootcause.md`.
+
+## Phases 0+1 — generation observability (2026-08-25)
+
+Spec: `superpowers/specs/2026-08-25-multi-llm-observability-agent-controls-design.md`
+Plan: `superpowers/plans/2026-08-25-generation-observability.md`
+
+`LlmEngine` gained `Stream<GenerationEvent> generateStream(String)`; `generate()`
+is now `bufferStream(generateStream(...))` so both APIs share one code path.
+The chat screen grows a single assistant bubble as tokens arrive, shows a live
+status line, and offers a stop button. A blank assistant bubble is no longer
+reachable — every terminal path writes something.
+
+**The "silent LLM" was never stuck.** On-device verification showed generation
+running the whole time at 0.43 tokens/sec, with a buffered API that displayed
+nothing until completion. Two real defects were behind it:
+
+- **Native code was unoptimized.** A debug APK builds llama.cpp with
+  `CMAKE_BUILD_TYPE=Debug` (`-O0`). Forcing `-O3 -DNDEBUG` took gemma-3-1b-Q4
+  on the vivo V2231 from 0.43 to ~2.5 tok/s — a full reply in 14s instead of
+  never finishing in view. Patched by `scripts/setup_llama_cpp_dart.sh`.
+- **No stop condition.** `llama_cpp_dart` 0.0.9 halts only on an EOG token or
+  the `nPredict` cap, and a plain-text prompt rarely makes a model emit EOG, so
+  the model wrote the rest of the transcript itself, inventing `User:` turns.
+  Fixed with stop sequences in `on_device_llama_engine.dart` (holding back a
+  tail so a partial marker is never rendered then retracted), a trailing
+  `Assistant:` cue in the prompt, and `nPredict` 32→256, `nCtx` 512→2048.
+
+Also corrected during design: `buildEngine` already routes on-device through
+`OnDeviceEngineRegistry`, so chat and Config share one engine — the
+duplicate-load theory was wrong.
+
+**Verified on-device:** tokens arrive incrementally, the status line advances
+through `loading model… → model ready → prompt sent → generating (N tokens)`,
+and generation completes. 69 unit tests pass.
+
+**Not yet verified on-device:** the stop-sequence fix and the nPredict/nCtx
+change were committed after the phone disconnected — see `status_open_points.md`.
