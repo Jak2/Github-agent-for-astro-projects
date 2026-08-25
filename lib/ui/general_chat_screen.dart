@@ -40,7 +40,10 @@ class _TextItem extends _ChatItem {
   /// tokens across three failed sends — and asks it to explain its own errors.
   final bool isNotice;
 
-  _TextItem(this.text, {required this.fromUser, this.isNotice = false});
+  /// Render in the mono face — git output is columnar and unreadable in Inter.
+  final bool mono;
+
+  _TextItem(this.text, {required this.fromUser, this.isNotice = false, this.mono = false});
 }
 
 class _RepoListItem extends _ChatItem {
@@ -104,6 +107,11 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
   String? _openFilePath;
   String? _openFileContent;
   String? _cloningFullName;
+
+  /// A git chip action is in flight. Separate from [_busy] on purpose: that
+  /// one owns the generation spinner and its stop button, which would be
+  /// meaningless over a push.
+  bool _gitBusy = false;
 
   /// Directories the user has unfolded, by relativePath. Display state only —
   /// renderFileTreeAsText still hands the LLM the whole tree.
@@ -638,6 +646,200 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     return tiles;
   }
 
+  // ---------------------------------------------------------------------
+  // Git action chips.
+  //
+  // Deterministic operations, so they are buttons rather than something the
+  // model has to be talked into. Nothing here touches _buildPrompt: every
+  // result is appended with isNotice: true and costs zero prompt tokens.
+  // ---------------------------------------------------------------------
+
+  void _appendGit(String text) {
+    if (!mounted) return;
+    setState(() => _append(_TextItem(text, fromUser: false, isNotice: true, mono: true)));
+  }
+
+  /// One funnel for every chip, so no path can lose an error: whatever the
+  /// action returns is rendered, and whatever it throws is rendered too —
+  /// with the PAT scrubbed out of the message either way.
+  Future<void> _runGitAction(
+    String label,
+    Future<List<String>> Function(RepoGitService service, Directory dir, String? token) run,
+  ) async {
+    final dir = _activeRepoDir;
+    if (dir == null || _gitBusy || !mounted) return;
+    setState(() => _gitBusy = true);
+    // Read up front purely so the catch blocks below can scrub it out of
+    // whatever libgit2 says. It is never rendered, only searched for.
+    String? token;
+    try {
+      token = await widget.secretStore.read(secretKeyGithubPat);
+      final reposRoot = await getApplicationDocumentsDirectory();
+      final lines = await run(RepoGitService(reposRoot: reposRoot), dir, token);
+      _appendGit('$label\n${truncateLines(lines).join('\n')}');
+    } on StateError catch (e) {
+      // Our own refusals (nothing to commit, not a fast-forward) — the
+      // message is already written for a human.
+      _appendGit('$label\n${redactSecrets(e.message, token: token)}');
+    } catch (e) {
+      _appendGit('$label failed:\n${redactSecrets('$e', token: token)}');
+    } finally {
+      if (mounted) setState(() => _gitBusy = false);
+    }
+  }
+
+  String _requireToken(String? token) {
+    if (token == null || token.isEmpty) {
+      throw StateError('GitHub Personal Access Token missing. Add one in Config.');
+    }
+    return token;
+  }
+
+  Future<void> _gitStatus() => _runGitAction(
+        '\$ git status',
+        (service, dir, _) => service.statusLines(dir),
+      );
+
+  Future<void> _gitLog() => _runGitAction(
+        '\$ git log -10',
+        (service, dir, _) async => formatLogLines(await service.recentCommits(dir)),
+      );
+
+  Future<void> _gitBranches() => _runGitAction(
+        '\$ git branch',
+        (service, dir, _) => service.branchLines(dir),
+      );
+
+  Future<void> _gitCommitAndPush() async {
+    if (_activeRepoDir == null || _gitBusy) return;
+    final message = await _askCommitMessage();
+    if (message == null) return; // cancelled
+    await _runGitAction(
+      '\$ git commit -a && git push',
+      (service, dir, token) async => [
+        await service.commitAllAndPush(
+          repoDir: dir,
+          message: message,
+          token: _requireToken(token),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _gitPull() => _runGitAction(
+        '\$ git pull --ff-only',
+        (service, dir, token) async => [
+          await service.pullFastForward(repoDir: dir, token: _requireToken(token)),
+        ],
+      );
+
+  /// Commit & push publishes to a real GitHub repo, so it always stops here
+  /// first. Returns null when the user backs out.
+  Future<String?> _askCommitMessage() async {
+    final controller = TextEditingController(text: 'Update from git_agent_app');
+    try {
+      return await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.bg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: AppColors.fg, width: 2),
+          ),
+          title: Text('Commit & push?', style: appHeading(size: 16)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Commits every pending change in ${_activeRepo?.fullName ?? 'this repo'} '
+                'and pushes it to GitHub.',
+                style: appBody(size: 12.5, color: AppColors.muted),
+              ),
+              const SizedBox(height: 12),
+              appBorderedField(controller: controller, hint: 'Commit message'),
+            ],
+          ),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          actions: [
+            Row(
+              children: [
+                // Full-width SizedBoxes: unwrapped in a Row they blow the
+                // frame's constraints.
+                Expanded(
+                  child: appSecondaryButton(
+                    label: 'Cancel',
+                    onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: appPrimaryButton(
+                    label: 'Push',
+                    onPressed: () {
+                      final text = controller.text.trim();
+                      Navigator.of(ctx).pop(text.isEmpty ? 'Update from git_agent_app' : text);
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
+  }
+
+  /// Horizontally scrollable so a narrow phone shrinks the row rather than
+  /// overflowing it. Hidden entirely until a repo is selected — the actions
+  /// have nothing to act on before that.
+  Widget _gitActionsBar() {
+    final busy = _gitBusy;
+    return SizedBox(
+      height: 46,
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        child: Row(
+          children: [
+            appActionChip(
+              icon: Icons.difference_outlined,
+              label: 'Status',
+              onPressed: busy ? null : _gitStatus,
+            ),
+            const SizedBox(width: 8),
+            appActionChip(
+              icon: Icons.history,
+              label: 'Log',
+              onPressed: busy ? null : _gitLog,
+            ),
+            const SizedBox(width: 8),
+            appActionChip(
+              icon: Icons.call_split,
+              label: 'Branches',
+              onPressed: busy ? null : _gitBranches,
+            ),
+            const SizedBox(width: 8),
+            appActionChip(
+              icon: Icons.south,
+              label: 'Pull',
+              onPressed: busy ? null : _gitPull,
+            ),
+            const SizedBox(width: 8),
+            appActionChip(
+              icon: Icons.cloud_upload_outlined,
+              label: 'Commit & push',
+              emphasis: true,
+              onPressed: busy ? null : _gitCommitAndPush,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// Sits right above the input so the scope the next question lands in is
   /// impossible to miss. The X clears it.
   Widget _pinnedChip(PinnedScope scope) {
@@ -704,7 +906,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
 
   Widget _buildItem(_ChatItem item) {
     return switch (item) {
-      _TextItem() => appChatBubble(text: item.text, fromUser: item.fromUser),
+      _TextItem() => appChatBubble(text: item.text, fromUser: item.fromUser, mono: item.mono),
       _RepoListItem() => Container(
           margin: const EdgeInsets.symmetric(vertical: 4),
           decoration: BoxDecoration(
@@ -915,6 +1117,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
                   ],
                 ),
               ),
+            if (_activeRepoDir != null) _gitActionsBar(),
             if (_pinned != null) _pinnedChip(_pinned!),
             Padding(
               padding: const EdgeInsets.all(12),

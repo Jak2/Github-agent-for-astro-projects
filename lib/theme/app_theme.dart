@@ -153,6 +153,53 @@ Widget appStepper({
   );
 }
 
+/// A compact bordered chip for an action bar — sized to its own label, so it
+/// is safe inside a `Row` (unlike appPrimaryButton/appSecondaryButton, which
+/// are full-width `SizedBox`es and blow a Row's constraints unwrapped).
+///
+/// [emphasis] inverts it to filled white: reserved for the action that
+/// publishes something outward, so it never looks like the read-only ones.
+Widget appActionChip({
+  required String label,
+  required IconData icon,
+  required VoidCallback? onPressed,
+  bool emphasis = false,
+}) {
+  final enabled = onPressed != null;
+  final fg = emphasis ? AppColors.bg : (enabled ? AppColors.fg : AppColors.muted);
+  final bg = emphasis ? (enabled ? AppColors.fg : AppColors.muted) : AppColors.bg;
+  final border = enabled ? AppColors.fg : AppColors.muted;
+
+  return Material(
+    color: bg,
+    borderRadius: BorderRadius.circular(10),
+    child: InkWell(
+      borderRadius: BorderRadius.circular(10),
+      onTap: enabled
+          ? () {
+              HapticFeedback.selectionClick();
+              onPressed();
+            }
+          : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          border: Border.all(color: border, width: 2),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: fg),
+            const SizedBox(width: 6),
+            Text(label, style: appMono(size: 11.5, color: fg, weight: FontWeight.w600)),
+          ],
+        ),
+      ),
+    ),
+  );
+}
+
 Widget appChatBubble({required String text, required bool fromUser, bool mono = false}) {
   final style = fromUser
       ? appBody(size: 13.5, color: AppColors.bg)
