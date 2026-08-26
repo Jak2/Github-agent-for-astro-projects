@@ -157,4 +157,23 @@ C
       expect(parseFileProposals(reply).proposals.single.path, 'cat/dog.md');
     });
   });
+
+  group('filePathRejection asFolder', () {
+    test('a trailing slash is a folder, not an error', () {
+      expect(filePathRejection('docs/guides/'), isNotNull);
+      expect(filePathRejection('docs/guides/', asFolder: true), isNull);
+      expect(filePathRejection('docs/guides', asFolder: true), isNull);
+    });
+
+    test('every other rule is unchanged for a folder', () {
+      for (final bad in ['/etc', '../up', 'a/../b', '.git/hooks', r'a\\b']) {
+        expect(filePathRejection(bad, asFolder: true), isNotNull, reason: bad);
+      }
+    });
+
+    test('a path that normalises to nothing is refused', () {
+      expect(filePathRejection('./', asFolder: true), isNotNull);
+      expect(filePathRejection('', asFolder: true), isNotNull);
+    });
+  });
 }

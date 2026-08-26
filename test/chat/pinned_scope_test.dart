@@ -85,4 +85,63 @@ void main() {
       );
     });
   });
+
+  group('applyPinnedFolder', () {
+    const catPin = PinnedScope(kind: PinKind.folder, path: 'cat', label: 'cat');
+    const nestedPin = PinnedScope(kind: PinKind.folder, path: 'docs/guides', label: 'guides');
+
+    test('no pin leaves the path alone', () {
+      expect(applyPinnedFolder('folder/name.md', null), 'folder/name.md');
+    });
+
+    test('a repo pin leaves the path alone — the whole repo is the scope', () {
+      expect(applyPinnedFolder('folder/name.md', const PinnedScope.repo('me/repo')),
+          'folder/name.md');
+    });
+
+    test('a file pin leaves the path alone', () {
+      expect(
+        applyPinnedFolder('notes.md',
+            const PinnedScope(kind: PinKind.file, path: 'cat/food.md', label: 'food.md')),
+        'notes.md',
+      );
+    });
+
+    test('a path already inside the pin is untouched', () {
+      expect(applyPinnedFolder('cat/food.md', catPin), 'cat/food.md');
+      expect(applyPinnedFolder('cat/deep/food.md', catPin), 'cat/deep/food.md');
+    });
+
+    test('a bare filename moves inside the pin', () {
+      expect(applyPinnedFolder('name.md', catPin), 'cat/name.md');
+    });
+
+    test('the model junk prefix is dropped, not nested under the pin', () {
+      // The real device output. Both of these landed at the repo root.
+      expect(applyPinnedFolder('folder/cat/dog_food/name.md', catPin), 'cat/name.md');
+      expect(applyPinnedFolder('folder/dog/dog_food/name.md', catPin), 'cat/name.md');
+    });
+
+    test('a nested pin gets the basename too', () {
+      expect(applyPinnedFolder('foo/bar/setup.md', nestedPin), 'docs/guides/setup.md');
+      expect(applyPinnedFolder('setup.md', nestedPin), 'docs/guides/setup.md');
+    });
+
+    test('a nested pin recognises its own subtree as already inside', () {
+      expect(applyPinnedFolder('docs/guides/setup.md', nestedPin), 'docs/guides/setup.md');
+    });
+
+    test('a sibling with the pin as a name prefix is not treated as inside', () {
+      expect(applyPinnedFolder('docs/guidesx/setup.md', nestedPin), 'docs/guides/setup.md');
+      expect(applyPinnedFolder('category/food.md', catPin), 'cat/food.md');
+    });
+
+    test('leading ./ and doubled slashes do not become the basename', () {
+      expect(applyPinnedFolder('./a//name.md', catPin), 'cat/name.md');
+    });
+
+    test('an empty path is left for the validator to reject', () {
+      expect(applyPinnedFolder('', catPin), '');
+    });
+  });
 }

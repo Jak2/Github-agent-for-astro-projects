@@ -96,7 +96,11 @@ ProposalParseResult parseFileProposals(String reply) {
 /// or an absolute path, and this runs against the user's real repository. So is
 /// a path the user has typed into the confirmation card — the same rules decide
 /// both, from here, so an edited path cannot take a softer route to disk.
-String? filePathRejection(String path) {
+/// [asFolder] relaxes exactly one rule — a trailing slash is a folder, which is
+/// the point when the "New folder" action is what is asking. Everything else
+/// (absolute, `..`, `.git`, backslashes) is identical, deliberately: one set of
+/// rules decides every path this app writes to.
+String? filePathRejection(String path, {bool asFolder = false}) {
   if (path.isEmpty) return 'no path given';
   if (path.startsWith('/') || RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(path)) {
     return 'absolute paths are not allowed';
@@ -105,7 +109,8 @@ String? filePathRejection(String path) {
   final segments = path.split('/');
   if (segments.contains('..')) return 'paths may not escape the repository';
   if (segments.contains('.git')) return 'writing inside .git is not allowed';
-  if (path.trimRight().endsWith('/')) return 'that is a folder, not a file';
+  if (!asFolder && path.trimRight().endsWith('/')) return 'that is a folder, not a file';
+  if (asFolder && normaliseFilePath(path).isEmpty) return 'no folder name given';
   return null;
 }
 

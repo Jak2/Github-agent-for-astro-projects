@@ -417,7 +417,14 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         ));
       } else {
         for (final p in result.proposals) {
-          newItems.add(_FileProposalItem(p, exists: await proposalFile(dir, p).exists()));
+          // The model does not reliably honour the pinned folder — it copied
+          // the prompt's own example prefix and wrote at the repo root. The
+          // app decides instead, on the card, where the user can still edit it.
+          final scoped = FileProposal(
+            path: applyPinnedFolder(p.path, _pinned),
+            content: p.content,
+          );
+          newItems.add(_FileProposalItem(scoped, exists: await proposalFile(dir, scoped).exists()));
         }
       }
     }
@@ -830,6 +837,92 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         ));
   }
 
+  /// Creates an empty directory under the active clone.
+  ///
+  /// Says out loud that git will not track it: an empty directory has no entry
+  /// in `git status` and does not survive a clone, so a silent "created" here
+  /// would be a folder the user cannot find again anywhere else.
+  Future<void> _newFolder() async {
+    final dir = _activeRepoDir;
+    if (dir == null) return;
+    final controller = TextEditingController();
+    final String? typed;
+    try {
+      typed = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.bg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(14),
+            side: const BorderSide(color: AppColors.fg, width: 2),
+          ),
+          title: Text('New folder', style: appHeading(size: 16)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Created in the local clone only. Git does not track empty '
+                'folders, so it will not show up in git status or survive a '
+                'clone until it contains a file.',
+                style: appBody(size: 12.5, color: AppColors.muted),
+              ),
+              const SizedBox(height: 12),
+              appBorderedField(controller: controller, hint: 'docs/guides'),
+            ],
+          ),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+          actions: [
+            Row(
+              children: [
+                // Full-width SizedBoxes: unwrapped in a Row they blow the
+                // frame's constraints.
+                Expanded(
+                  child: appSecondaryButton(
+                    label: 'Cancel',
+                    onPressed: () => Navigator.of(ctx).pop(),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: appPrimaryButton(
+                    label: 'Create',
+                    onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
+    if (typed == null) return; // cancelled
+
+    // Same rules as every other path this app writes, with the one relaxation
+    // that a trailing slash names a folder rather than being an error.
+    final rejection = filePathRejection(typed, asFolder: true);
+    if (rejection != null) {
+      _appendNotice('Will not create "$typed" — $rejection.');
+      return;
+    }
+    final relative = normaliseFilePath(typed);
+    try {
+      final created = await Directory('${dir.path}/$relative').create(recursive: true);
+      final tree = await buildFileTree(dir);
+      if (!mounted) return;
+      setState(() => _fileTree = tree);
+      _appendNotice(
+        'Created folder ${created.path}\n'
+        'Local clone only, and empty — git will not track it until it '
+        'contains a file.',
+      );
+    } catch (e) {
+      _appendNotice('Could not create folder $relative: $e');
+    }
+  }
+
   GithubRepo _requireRepo() {
     final repo = _activeRepo;
     if (repo == null) throw StateError('No repository selected.');
@@ -1147,6 +1240,12 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
             ),
             const SizedBox(width: 8),
             appActionChip(
+              icon: Icons.create_new_folder_outlined,
+              label: 'New folder',
+              onPressed: busy ? null : _newFolder,
+            ),
+            const SizedBox(width: 8),
+            appActionChip(
               icon: Icons.verified_user_outlined,
               label: 'Check access',
               onPressed: busy ? null : _gitCheckAccess,
@@ -1327,6 +1426,175 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     };
   }
 
+  /// A destination picker over the real repo tree, folders only — a file is
+  /// not somewhere a file can be created. Returns the chosen repo-relative
+  /// folder ('' is the repo root), or null when the user backed out.
+  ///
+  /// ponytail: a separate compact renderer rather than reusing [_fileTiles].
+  /// That one lists files, carries a pin button per row, and taps into chat
+  /// state; none of it applies here, so parameterising it away would have cost
+  /// more than these rows do.
+  Future<String?> _pickFolder(String currentPath) async {
+    final tree = _fileTree;
+    if (tree == null) return null;
+    // Start on the folder the path field already names, with its ancestors
+    // unfolded, so the picker opens where the user already is.
+    var selected = currentPath.contains('/')
+        ? currentPath.substring(0, currentPath.lastIndexOf('/'))
+        : '';
+    final expanded = <String>{};
+    for (final segment in selected.split('/')) {
+      if (segment.isEmpty) continue;
+      expanded.add(expanded.isEmpty ? segment : '${expanded.last}/$segment');
+    }
+
+    Widget row({
+      required String path,
+      required String name,
+      required int depth,
+      required bool isDir,
+      required bool open,
+      required VoidCallback onTap,
+    }) {
+      final chosen = selected == path;
+      return InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(4 + depth * 16.0, 8, 8, 8),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 15,
+                child: isDir
+                    ? Icon(open ? Icons.expand_more : Icons.chevron_right,
+                        size: 15, color: AppColors.fg)
+                    : null,
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.folder_outlined, size: 15, color: AppColors.fg),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  name,
+                  style: appMono(size: 12, weight: chosen ? FontWeight.w700 : FontWeight.w400),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              if (chosen) const Icon(Icons.check, size: 15, color: AppColors.fg),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          List<Widget> folderRows(FileTreeNode node, int depth) {
+            final out = <Widget>[];
+            for (final child in node.children) {
+              if (!child.isDirectory) continue;
+              final open = expanded.contains(child.relativePath);
+              out.add(row(
+                path: child.relativePath,
+                name: child.name,
+                depth: depth,
+                isDir: true,
+                open: open,
+                // One tap both selects and unfolds: on a phone, two separate
+                // targets this size are a mis-tap generator.
+                onTap: () => setLocal(() {
+                  selected = child.relativePath;
+                  if (!expanded.remove(child.relativePath)) expanded.add(child.relativePath);
+                }),
+              ));
+              if (open) out.addAll(folderRows(child, depth + 1));
+            }
+            return out;
+          }
+
+          return AlertDialog(
+            backgroundColor: AppColors.bg,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(14),
+              side: const BorderSide(color: AppColors.fg, width: 2),
+            ),
+            title: Text('Pick a folder', style: appHeading(size: 16)),
+            contentPadding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            content: SizedBox(
+              width: double.maxFinite,
+              height: 300,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    selected.isEmpty ? 'Selected: repository root' : 'Selected: $selected/',
+                    style: appMono(size: 11, color: AppColors.muted),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 6),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          row(
+                            path: '',
+                            name: '/  (repository root)',
+                            depth: 0,
+                            isDir: false,
+                            open: false,
+                            onTap: () => setLocal(() => selected = ''),
+                          ),
+                          ...folderRows(tree, 1),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actionsPadding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+            actions: [
+              Row(
+                children: [
+                  // Full-width SizedBoxes: unwrapped in a Row they blow the
+                  // frame's constraints.
+                  Expanded(
+                    child: appSecondaryButton(
+                      label: 'Cancel',
+                      onPressed: () => Navigator.of(ctx).pop(),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: appPrimaryButton(
+                      label: 'Select this folder',
+                      onPressed: () => Navigator.of(ctx).pop(selected),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// Folder picked -> path field, keeping whatever filename was already there.
+  Future<void> _pickFolderInto(_FileProposalItem item) async {
+    final current = item.pathController.text.trim();
+    final folder = await _pickFolder(current);
+    if (folder == null || !mounted) return;
+    // A trailing slash means there is no filename yet; so does an empty field.
+    final last = current.split('/').last.trim();
+    final filename = last.isEmpty ? 'untitled.md' : last;
+    item.pathController.text = folder.isEmpty ? filename : '$folder/$filename';
+    await _proposalPathChanged(item);
+  }
+
   /// The confirmation card. Both fields are live: what is in them when
   /// Create is pressed is what lands on disk. The path is validated on every
   /// keystroke by the same [filePathRejection] the parser uses, and Create is
@@ -1350,7 +1618,8 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
           ),
           const SizedBox(height: 2),
           Text(
-            'Edit the path or the content before writing.',
+            'Edit the path or the content before writing. '
+            'The folder icon picks a destination from the repo.',
             style: appBody(size: 12, color: AppColors.muted),
           ),
           const SizedBox(height: 8),
@@ -1359,6 +1628,23 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
             hint: 'path/in/repo.md',
             enabled: !item.handled,
             onChanged: (_) => _proposalPathChanged(item),
+            // An affordance inside the field rather than the field's own
+            // onTap: hijacking every tap would make typing a path — which
+            // still has to work — impossible.
+            suffix: item.handled
+                ? null
+                : Tooltip(
+                    message: 'Pick a folder from the repo',
+                    child: InkWell(
+                      onTap: () => _pickFolderInto(item),
+                      child: const Icon(
+                        Icons.folder_open,
+                        size: 18,
+                        color: AppColors.fg,
+                        semanticLabel: 'Pick a folder from the repo',
+                      ),
+                    ),
+                  ),
           ),
           if (pathError != null)
             Padding(

@@ -31,9 +31,10 @@ import 'pinned_scope.dart';
   // is prepended to every prompt and on-device context is 4096 tokens.
   header
     ..writeln('To create or write a file, reply with a fenced block:')
-    ..writeln('```create-file path=folder/name.md')
+    ..writeln('```create-file path=<folder>/<filename>.md')
     ..writeln('file content')
     ..writeln('```')
+    ..writeln('Replace <folder>/<filename>.md with the real path — it is a placeholder.')
     ..writeln('Saying a file was created does not create it. Only that block does.')
     ..writeln('Use the exact filename the user asked for.')
     ..writeln('The path must be inside the repository. '

@@ -72,3 +72,23 @@ List<String> filePathsUnder(FileTreeNode node) {
   walk(node);
   return paths;
 }
+
+/// Rewrites [proposedPath] so it lands inside a pinned folder.
+///
+/// A 1-1.5B model ignores "put new files inside cat/" — real device runs
+/// produced `folder/cat/dog_food/name.md` at the repo root with `cat` pinned,
+/// prefixes copied straight out of the prompt's example. So the app decides,
+/// not the model: the BASENAME is placed inside the pin, which drops the
+/// invented prefixes rather than nesting them under it.
+///
+/// Applied when the confirmation card is built, so the user sees the corrected
+/// path and can still edit it — never silently at write time.
+String applyPinnedFolder(String proposedPath, PinnedScope? pinned) {
+  if (pinned == null || pinned.kind != PinKind.folder || pinned.path.isEmpty) {
+    return proposedPath;
+  }
+  if (proposedPath.startsWith('${pinned.path}/')) return proposedPath;
+  final segments = proposedPath.split('/').where((s) => s.isNotEmpty && s != '.').toList();
+  if (segments.isEmpty) return proposedPath;
+  return '${pinned.path}/${segments.last}';
+}

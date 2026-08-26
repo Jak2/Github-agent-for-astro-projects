@@ -74,7 +74,18 @@ void main() {
     // perfectly and the app still writes nothing.
     final parsed = parseFileProposals(build(null).header);
     expect(parsed.rejected, isEmpty);
-    expect(parsed.proposals.single.path, 'folder/name.md');
+    expect(parsed.proposals.single.path, '<folder>/<filename>.md');
+  });
+
+  test('the example path cannot be mistaken for a real one', () {
+    // A 1-1.5B model copied the old `folder/name.md` verbatim and wrote
+    // `folder/cat/dog_food/name.md` at the repo root. Angle brackets are the
+    // one shape no real file has, so a literal copy is at least obviously a
+    // placeholder — and applyPinnedFolder catches it anyway.
+    final path = parseFileProposals(build(null).header).proposals.single.path;
+    expect(path, contains('<'));
+    expect(path, contains('>'));
+    expect(build(null).header, contains('it is a placeholder'));
   });
 
   test('a folder pin tells the model to put new files in that folder', () {

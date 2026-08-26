@@ -45,6 +45,9 @@ Widget appBorderedField({
   TextInputType? keyboardType,
   bool enabled = true,
   ValueChanged<String>? onChanged,
+  // Trailing affordance inside the border — e.g. the folder picker on the
+  // proposal card's path field. Null keeps the plain field.
+  Widget? suffix,
 }) {
   return TextField(
     controller: controller,
@@ -57,6 +60,7 @@ Widget appBorderedField({
     decoration: InputDecoration(
       hintText: hint,
       hintStyle: appMono(size: 13, color: AppColors.muted),
+      suffixIcon: suffix,
       filled: true,
       fillColor: AppColors.bg,
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
