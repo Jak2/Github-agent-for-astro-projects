@@ -143,5 +143,18 @@ void main() {
     test('an empty path is left for the validator to reject', () {
       expect(applyPinnedFolder('', catPin), '');
     });
+
+    // The New folder card seeds its path field with applyPinnedFolder('new-folder')
+    // and starts empty when the seed comes back unmoved. That contract is what
+    // decides whether a new folder lands inside the pin, so it is pinned here.
+    test('the New folder seed lands inside a folder pin', () {
+      expect(applyPinnedFolder('new-folder', catPin), 'cat/new-folder');
+      expect(applyPinnedFolder('new-folder', nestedPin), 'docs/guides/new-folder');
+    });
+
+    test('the New folder seed is unmoved without a folder pin', () {
+      expect(applyPinnedFolder('new-folder', null), 'new-folder');
+      expect(applyPinnedFolder('new-folder', const PinnedScope.repo('me/repo')), 'new-folder');
+    });
   });
 }

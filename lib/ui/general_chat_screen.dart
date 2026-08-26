@@ -75,13 +75,19 @@ class _FileProposalItem extends _ChatItem {
   final TextEditingController pathController;
   final TextEditingController contentController;
 
+  /// The folder variant of the same card: same path field, same picker, same
+  /// validator (with asFolder), minus the content field — a directory has no
+  /// content. A flag rather than a sibling class so the card, the picker
+  /// wiring and the validation stay in one place.
+  final bool isFolder;
+
   /// Decides Create vs Overwrite. Re-checked whenever the path is edited.
   bool exists;
 
   /// Set once the user has chosen, so the same write cannot be fired twice.
   bool handled = false;
 
-  _FileProposalItem(FileProposal proposal, {required this.exists})
+  _FileProposalItem(FileProposal proposal, {required this.exists, this.isFolder = false})
       : pathController = TextEditingController(text: proposal.path),
         contentController = TextEditingController(text: proposal.content);
 
@@ -445,7 +451,8 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     // an empty setState is exactly the update they need.
     setState(() {});
     final dir = _activeRepoDir;
-    if (dir == null || filePathRejection(typed) != null) return;
+    // A folder card never says Overwrite, so there is nothing to probe for.
+    if (dir == null || item.isFolder || filePathRejection(typed) != null) return;
     final exists = await File('${dir.path}/${normaliseFilePath(typed)}').exists();
     // Fast typing outruns the filesystem: only the answer for what is still
     // in the field may land.
@@ -460,7 +467,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     // The button is already disabled while this fails. Checked again anyway:
     // this is the one place an edited path turns into a write, and it must
     // not be a softer gate than the parser's.
-    final rejection = filePathRejection(typed);
+    final rejection = filePathRejection(typed, asFolder: item.isFolder);
     if (rejection != null) {
       setState(() => _append(_TextItem(
             'Will not write "$typed" — $rejection.',
@@ -468,21 +475,30 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
           )));
       return;
     }
-    final proposal = FileProposal(
-      path: normaliseFilePath(typed),
-      content: item.contentController.text,
-    );
+    final relative = normaliseFilePath(typed);
     setState(() => item.handled = true);
     try {
-      final file = await writeProposal(dir, proposal);
+      final String notice;
+      if (item.isFolder) {
+        final created = await Directory('${dir.path}/$relative').create(recursive: true);
+        // Said out loud every time: an empty directory has no entry in
+        // `git status` and does not survive a clone, so a bare "created"
+        // would be a folder the user cannot find again anywhere else.
+        notice = 'Created folder ${created.path}\n'
+            'Local clone only, and empty — git will not track it until it '
+            'contains a file.';
+      } else {
+        final file = await writeProposal(
+          dir,
+          FileProposal(path: relative, content: item.contentController.text),
+        );
+        notice = 'Wrote ${file.path}\nLocal clone only — not committed or pushed.';
+      }
       final tree = await buildFileTree(dir);
       if (!mounted) return;
       setState(() {
         _fileTree = tree;
-        _append(_TextItem(
-          'Wrote ${file.path}\nLocal clone only — not committed or pushed.',
-          fromUser: false, isNotice: true,
-        ));
+        _append(_TextItem(notice, fromUser: false, isNotice: true));
       });
       await _refreshUncommitted();
     } catch (e) {
@@ -490,7 +506,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
       setState(() {
         item.handled = false; // the write failed, so let them try again
         _append(_TextItem(
-          'Could not write ${proposal.path}: $e',
+          'Could not ${item.isFolder ? 'create folder' : 'write'} $relative: $e',
           fromUser: false, isNotice: true,
         ));
       });
@@ -501,7 +517,8 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     setState(() {
       item.handled = true;
       _append(_TextItem(
-        'Cancelled — ${item.pathController.text.trim()} was not written.',
+        'Cancelled — ${item.pathController.text.trim()} was not '
+        '${item.isFolder ? 'created' : 'written'}.',
         fromUser: false, isNotice: true,
       ));
     });
@@ -837,90 +854,25 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         ));
   }
 
-  /// Creates an empty directory under the active clone.
+  /// The same confirmation card as [_newFile], minus the content field.
   ///
-  /// Says out loud that git will not track it: an empty directory has no entry
-  /// in `git status` and does not survive a clone, so a silent "created" here
-  /// would be a folder the user cannot find again anywhere else.
-  Future<void> _newFolder() async {
-    final dir = _activeRepoDir;
-    if (dir == null) return;
-    final controller = TextEditingController();
-    final String? typed;
-    try {
-      typed = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: AppColors.bg,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-            side: const BorderSide(color: AppColors.fg, width: 2),
+  /// The card says out loud that git will not track an empty directory: it has
+  /// no entry in `git status` and does not survive a clone, so a silent
+  /// "created" would be a folder the user cannot find again anywhere else.
+  void _newFolder() {
+    if (_activeRepoDir == null) return;
+    // A pinned folder decides where a new folder lands, exactly as it does for
+    // a new file. ponytail: applyPinnedFolder owns that rule — a seed it did
+    // not move means no folder pin, so the field starts empty like New file.
+    const seed = 'new-folder';
+    final prefill = applyPinnedFolder(seed, _pinned);
+    setState(() => _append(
+          _FileProposalItem(
+            FileProposal(path: prefill == seed ? '' : prefill, content: ''),
+            exists: false,
+            isFolder: true,
           ),
-          title: Text('New folder', style: appHeading(size: 16)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Created in the local clone only. Git does not track empty '
-                'folders, so it will not show up in git status or survive a '
-                'clone until it contains a file.',
-                style: appBody(size: 12.5, color: AppColors.muted),
-              ),
-              const SizedBox(height: 12),
-              appBorderedField(controller: controller, hint: 'docs/guides'),
-            ],
-          ),
-          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-          actions: [
-            Row(
-              children: [
-                // Full-width SizedBoxes: unwrapped in a Row they blow the
-                // frame's constraints.
-                Expanded(
-                  child: appSecondaryButton(
-                    label: 'Cancel',
-                    onPressed: () => Navigator.of(ctx).pop(),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: appPrimaryButton(
-                    label: 'Create',
-                    onPressed: () => Navigator.of(ctx).pop(controller.text.trim()),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-      );
-    } finally {
-      controller.dispose();
-    }
-    if (typed == null) return; // cancelled
-
-    // Same rules as every other path this app writes, with the one relaxation
-    // that a trailing slash names a folder rather than being an error.
-    final rejection = filePathRejection(typed, asFolder: true);
-    if (rejection != null) {
-      _appendNotice('Will not create "$typed" — $rejection.');
-      return;
-    }
-    final relative = normaliseFilePath(typed);
-    try {
-      final created = await Directory('${dir.path}/$relative').create(recursive: true);
-      final tree = await buildFileTree(dir);
-      if (!mounted) return;
-      setState(() => _fileTree = tree);
-      _appendNotice(
-        'Created folder ${created.path}\n'
-        'Local clone only, and empty — git will not track it until it '
-        'contains a file.',
-      );
-    } catch (e) {
-      _appendNotice('Could not create folder $relative: $e');
-    }
+        ));
   }
 
   GithubRepo _requireRepo() {
@@ -1583,15 +1535,17 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     );
   }
 
-  /// Folder picked -> path field, keeping whatever filename was already there.
+  /// Folder picked -> path field, keeping whatever name was already there.
+  /// On a folder card the picked folder is the parent and the last segment is
+  /// the new directory's own name — same shape, one different default.
   Future<void> _pickFolderInto(_FileProposalItem item) async {
     final current = item.pathController.text.trim();
     final folder = await _pickFolder(current);
     if (folder == null || !mounted) return;
-    // A trailing slash means there is no filename yet; so does an empty field.
+    // A trailing slash means there is no name yet; so does an empty field.
     final last = current.split('/').last.trim();
-    final filename = last.isEmpty ? 'untitled.md' : last;
-    item.pathController.text = folder.isEmpty ? filename : '$folder/$filename';
+    final name = last.isEmpty ? (item.isFolder ? 'new-folder' : 'untitled.md') : last;
+    item.pathController.text = folder.isEmpty ? name : '$folder/$name';
     await _proposalPathChanged(item);
   }
 
@@ -1601,7 +1555,7 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
   /// dead while it fails.
   Widget _proposalCard(_FileProposalItem item) {
     final typedPath = item.pathController.text.trim();
-    final pathError = filePathRejection(typedPath);
+    final pathError = filePathRejection(typedPath, asFolder: item.isFolder);
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 4),
       padding: const EdgeInsets.all(12),
@@ -1613,19 +1567,31 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            item.exists ? 'Overwrite this file?' : 'Create this file?',
+            item.isFolder
+                ? 'Create this folder?'
+                : item.exists
+                    ? 'Overwrite this file?'
+                    : 'Create this file?',
             style: appBody(size: 13.5, weight: FontWeight.w600),
           ),
           const SizedBox(height: 2),
           Text(
-            'Edit the path or the content before writing. '
-            'The folder icon picks a destination from the repo.',
+            item.isFolder
+                // Never dropped: an empty directory is invisible to git, and
+                // this is the moment the user can still be told.
+                ? 'Edit the path before creating. The folder icon picks a '
+                    'destination from the repo. Created in the local clone '
+                    'only — git does not track empty folders, so it will not '
+                    'show up in git status or survive a clone until it '
+                    'contains a file.'
+                : 'Edit the path or the content before writing. '
+                    'The folder icon picks a destination from the repo.',
             style: appBody(size: 12, color: AppColors.muted),
           ),
           const SizedBox(height: 8),
           appBorderedField(
             controller: item.pathController,
-            hint: 'path/in/repo.md',
+            hint: item.isFolder ? 'docs/guides' : 'path/in/repo.md',
             enabled: !item.handled,
             onChanged: (_) => _proposalPathChanged(item),
             // An affordance inside the field rather than the field's own
@@ -1649,7 +1615,10 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
           if (pathError != null)
             Padding(
               padding: const EdgeInsets.only(top: 4),
-              child: Text('Cannot write that path — $pathError.', style: appBody(size: 12)),
+              child: Text(
+                'Cannot ${item.isFolder ? 'create' : 'write'} that path — $pathError.',
+                style: appBody(size: 12),
+              ),
             )
           else if (item.exists)
             Padding(
@@ -1659,15 +1628,17 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
                 style: appBody(size: 12, color: AppColors.muted),
               ),
             ),
-          const SizedBox(height: 8),
-          // maxLines caps the height and scrolls inside it, so a long file
-          // cannot stretch the card off the screen.
-          appBorderedField(
-            controller: item.contentController,
-            hint: 'File content',
-            maxLines: 8,
-            enabled: !item.handled,
-          ),
+          if (!item.isFolder) ...[
+            const SizedBox(height: 8),
+            // maxLines caps the height and scrolls inside it, so a long file
+            // cannot stretch the card off the screen.
+            appBorderedField(
+              controller: item.contentController,
+              hint: 'File content',
+              maxLines: 8,
+              enabled: !item.handled,
+            ),
+          ],
           const SizedBox(height: 8),
           if (item.handled)
             Text('Done.', style: appBody(size: 12, color: AppColors.muted))
