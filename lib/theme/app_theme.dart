@@ -249,3 +249,40 @@ Widget appIconCircleButton({required IconData icon, required VoidCallback? onPre
     ),
   );
 }
+
+/// Keeps [controllers] alive for exactly as long as the route that builds this
+/// widget, and disposes them in [State.dispose].
+///
+/// Dialog helpers used to create a controller, `await showDialog(...)`, then
+/// dispose it in a `finally`. That future completes at `Navigator.pop`, but the
+/// popped route keeps its subtree mounted and updating through the close
+/// animation — a focused field re-listens to its controller mid-animation and
+/// hits "A TextEditingController was used after being disposed", which cascades
+/// into the `_dependents.isEmpty` assert and a red screen.
+///
+/// Wrap the dialog's content in this and drop the `finally`: Flutter calls
+/// [State.dispose] only once the route is fully gone, animation included.
+/// Reading `controller.text` right after the `await` is still fine — that runs
+/// in the same turn as the pop, many frames before disposal.
+class DisposeWithRoute extends StatefulWidget {
+  const DisposeWithRoute({super.key, required this.controllers, required this.child});
+
+  final List<TextEditingController> controllers;
+  final Widget child;
+
+  @override
+  State<DisposeWithRoute> createState() => _DisposeWithRouteState();
+}
+
+class _DisposeWithRouteState extends State<DisposeWithRoute> {
+  @override
+  void dispose() {
+    for (final controller in widget.controllers) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}

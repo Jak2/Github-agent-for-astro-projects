@@ -892,10 +892,13 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
   /// first. Returns null when the user backs out.
   Future<String?> _askCommitMessage() async {
     final controller = TextEditingController(text: 'Update from git_agent_app');
-    try {
-      return await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
+    return showDialog<String>(
+      context: context,
+      // The route owns the controller: the field is still live (and still
+      // re-listening) while this dialog animates out.
+      builder: (ctx) => DisposeWithRoute(
+        controllers: [controller],
+        child: AlertDialog(
           backgroundColor: AppColors.bg,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
@@ -941,10 +944,8 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
             ),
           ],
         ),
-      );
-    } finally {
-      controller.dispose();
-    }
+      ),
+    );
   }
 
   // ---------------------------------------------------------------------
@@ -1024,10 +1025,13 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
     if (!mounted) return;
 
     final controller = TextEditingController(text: content);
-    try {
-      final action = await showDialog<String>(
-        context: context,
-        builder: (ctx) => AlertDialog(
+    final action = await showDialog<String>(
+      context: context,
+      // The route owns the controller: the field is still live (and still
+      // re-listening) while this dialog animates out.
+      builder: (ctx) => DisposeWithRoute(
+        controllers: [controller],
+        child: AlertDialog(
           backgroundColor: AppColors.bg,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(14),
@@ -1074,21 +1078,21 @@ class _GeneralChatScreenState extends State<GeneralChatScreen> {
             ),
           ],
         ),
-      );
+      ),
+    );
 
-      if (action == 'save') {
-        try {
-          await file.writeAsString(controller.text);
-          _appendNotice('Saved $relativePath — local clone only.');
-        } catch (e) {
-          _appendNotice('Could not save $relativePath: $e');
-        }
-        await _refreshUncommitted();
-      } else if (action == 'delete') {
-        await _deleteUncommittedFile(relativePath, file);
+    // Safe to read after the await: the pop resumes this in the same turn,
+    // long before the route (and the controller with it) is disposed.
+    if (action == 'save') {
+      try {
+        await file.writeAsString(controller.text);
+        _appendNotice('Saved $relativePath — local clone only.');
+      } catch (e) {
+        _appendNotice('Could not save $relativePath: $e');
       }
-    } finally {
-      controller.dispose();
+      await _refreshUncommitted();
+    } else if (action == 'delete') {
+      await _deleteUncommittedFile(relativePath, file);
     }
   }
 

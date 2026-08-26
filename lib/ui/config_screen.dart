@@ -119,64 +119,65 @@ class _ConfigScreenState extends State<ConfigScreen> {
 
     final saved = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: AppColors.bg,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(18),
-          side: const BorderSide(color: AppColors.fg, width: 3),
+      // The route owns the controllers: the fields are still live (and still
+      // re-listening) while this dialog animates out.
+      builder: (context) => DisposeWithRoute(
+        controllers: [nameController, descriptionController, contentController],
+        child: AlertDialog(
+          backgroundColor: AppColors.bg,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+            side: const BorderSide(color: AppColors.fg, width: 3),
+          ),
+          title: Text(existing == null ? 'Add' : 'Edit', style: appHeading(size: 16, weight: FontWeight.w700)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                appBorderedField(controller: nameController, hint: 'Name', enabled: existing == null),
+                const SizedBox(height: 10),
+                appBorderedField(controller: descriptionController, hint: 'Description'),
+                const SizedBox(height: 10),
+                appBorderedField(controller: contentController, hint: 'Content (Markdown)', maxLines: 5),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: Text('Cancel', style: appBody(size: 13, weight: FontWeight.w600)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text('Save', style: appBody(size: 13, weight: FontWeight.w600)),
+            ),
+          ],
         ),
-        title: Text(existing == null ? 'Add' : 'Edit', style: appHeading(size: 16, weight: FontWeight.w700)),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              appBorderedField(controller: nameController, hint: 'Name', enabled: existing == null),
-              const SizedBox(height: 10),
-              appBorderedField(controller: descriptionController, hint: 'Description'),
-              const SizedBox(height: 10),
-              appBorderedField(controller: contentController, hint: 'Content (Markdown)', maxLines: 5),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: Text('Cancel', style: appBody(size: 13, weight: FontWeight.w600)),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: Text('Save', style: appBody(size: 13, weight: FontWeight.w600)),
-          ),
-        ],
       ),
     );
 
+    // Safe to read after the await: the pop resumes this in the same turn,
+    // long before the route (and the controllers with it) are disposed.
+    if (saved != true) return;
     try {
-      if (saved != true) return;
-      try {
-        if (existing == null) {
-          await library.add(
-            name: nameController.text,
-            description: descriptionController.text,
-            content: contentController.text,
-          );
-        } else {
-          await library.update(
-            existing.slug,
-            description: descriptionController.text,
-            content: contentController.text,
-          );
-        }
-        onUpdated(await library.list());
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: $e')));
-        }
+      if (existing == null) {
+        await library.add(
+          name: nameController.text,
+          description: descriptionController.text,
+          content: contentController.text,
+        );
+      } else {
+        await library.update(
+          existing.slug,
+          description: descriptionController.text,
+          content: contentController.text,
+        );
       }
-    } finally {
-      nameController.dispose();
-      descriptionController.dispose();
-      contentController.dispose();
+      onUpdated(await library.list());
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Save failed: $e')));
+      }
     }
   }
 
@@ -302,10 +303,13 @@ class _ConfigScreenState extends State<ConfigScreen> {
     final model = TextEditingController();
     final apiKey = TextEditingController();
     final headers = TextEditingController();
-    try {
-      final saved = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
+    final saved = await showDialog<bool>(
+      context: context,
+      // The route owns the controllers: the fields are still live (and still
+      // re-listening) while this dialog animates out.
+      builder: (context) => DisposeWithRoute(
+        controllers: [label, endpoint, model, apiKey, headers],
+        child: AlertDialog(
           backgroundColor: AppColors.bg,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(18),
@@ -343,42 +347,38 @@ class _ConfigScreenState extends State<ConfigScreen> {
             ),
           ],
         ),
-      );
-      if (saved != true) return;
+      ),
+    );
+    if (saved != true) return;
 
-      final url = endpoint.text.trim();
-      if (url.isEmpty) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Not added — a cloud LLM needs an endpoint URL.')));
-        }
-        return;
+    // Safe to read after the await: the pop resumes this in the same turn,
+    // long before the route (and the controllers with it) are disposed.
+    final url = endpoint.text.trim();
+    if (url.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Not added — a cloud LLM needs an endpoint URL.')));
       }
-      final name = model.text.trim();
-      final entry = LlmEntry.cloud(
-        id: _newEntryId(),
-        label: label.text.trim().isNotEmpty
-            ? label.text.trim()
-            : (name.isNotEmpty ? name : 'Cloud API'),
-        endpoint: url,
-        model: name,
-        headers: headers.text,
-      );
-      // The key goes to secure storage under this entry's own name; the entry
-      // itself has nowhere to hold a secret, so nothing key-shaped can reach
-      // shared_preferences.
-      await widget.secretStore.write(entry.secretKey!, apiKey.text);
-      await _commit(
-        _library.add(entry),
-        'Added "${entry.label}". Its API key is in secure storage, not in settings.',
-      );
-    } finally {
-      label.dispose();
-      endpoint.dispose();
-      model.dispose();
-      apiKey.dispose();
-      headers.dispose();
+      return;
     }
+    final name = model.text.trim();
+    final entry = LlmEntry.cloud(
+      id: _newEntryId(),
+      label: label.text.trim().isNotEmpty
+          ? label.text.trim()
+          : (name.isNotEmpty ? name : 'Cloud API'),
+      endpoint: url,
+      model: name,
+      headers: headers.text,
+    );
+    // The key goes to secure storage under this entry's own name; the entry
+    // itself has nowhere to hold a secret, so nothing key-shaped can reach
+    // shared_preferences.
+    await widget.secretStore.write(entry.secretKey!, apiKey.text);
+    await _commit(
+      _library.add(entry),
+      'Added "${entry.label}". Its API key is in secure storage, not in settings.',
+    );
   }
 
   /// Makes [entry] the active LLM.
