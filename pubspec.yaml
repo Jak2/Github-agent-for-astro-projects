@@ -1,5 +1,5 @@
-name: git_agent_app
-description: "A new Flutter project."
+name: pocket_git
+description: "PocketGit — browse your GitHub repos, create and edit files, commit and push, from your phone."
 # The following line prevents the package from being accidentally published to
 # pub.dev using `flutter pub publish`. This is preferred for private packages.
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
@@ -40,10 +40,7 @@ dependencies:
   share_plus: ^10.0.0
   path_provider: ^2.1.0
   path: ^1.9.0
-  llama_cpp_dart: ^0.0.9
   google_fonts: ^6.2.1
-  langchain: ^0.8.1
-  langchain_openai: ^0.8.1+1
 
 dev_dependencies:
   flutter_test:
@@ -62,9 +59,6 @@ dev_dependencies:
 # The following section is specific to Flutter packages.
 flutter:
   uses-material-design: true
-  assets:
-    - assets/structure.md
-    - assets/personas/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

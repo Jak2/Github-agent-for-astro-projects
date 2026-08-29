@@ -3,7 +3,10 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:git2dart/git2dart.dart';
-import 'package:git_agent_app/git/repo_git_service.dart';
+import 'package:pocket_git/git/git_identity.dart';
+import 'package:pocket_git/git/repo_git_service.dart';
+
+const testIdentity = CommitIdentity(name: 'test', email: 'test@example.com');
 
 void main() {
   group('formatStatusLines', () {
@@ -156,7 +159,7 @@ void main() {
         );
 
     setUp(() {
-      tmp = Directory.systemTemp.createTempSync('git_agent_app_test');
+      tmp = Directory.systemTemp.createTempSync('pocket_git_test');
       Repository.init(path: tmp.path).free();
       service = RepoGitService(reposRoot: tmp);
     });
@@ -225,7 +228,7 @@ void main() {
     test('commit & push refuses a clean tree before it ever reaches the network', () async {
       commit('a.txt', '1', 'first');
       expect(
-        () => service.commitAllAndPush(repoDir: tmp, message: 'x', token: 'ghp_FAKE'),
+        () => service.commitAllAndPush(repoDir: tmp, message: 'x', token: 'ghp_FAKE', identity: testIdentity),
         throwsA(isA<StateError>().having((e) => e.message, 'message', contains('Nothing to commit'))),
       );
     });
@@ -237,6 +240,149 @@ void main() {
         () => service.pullFastForward(repoDir: tmp, token: 'ghp_FAKE'),
         throwsA(isA<StateError>().having((e) => e.message, 'message', contains('uncommitted change'))),
       );
+    });
+
+    test('a new branch is created, switched to, and keeps uncommitted work', () async {
+      commit('a.txt', '1', 'first');
+      final start = await service.currentBranchName(tmp);
+      File('${tmp.path}/wip.txt').writeAsStringSync('in progress');
+
+      final summary = await service.createBranch(repoDir: tmp, name: 'feature');
+
+      expect(summary, contains('feature'));
+      expect(await service.currentBranchName(tmp), 'feature');
+      expect(start, isNot('feature'));
+      // Branching points at the commit already checked out, so the working
+      // tree comes along — exactly like `git checkout -b`.
+      expect(File('${tmp.path}/wip.txt').existsSync(), isTrue);
+    });
+
+    test('createBranch with checkout: false leaves HEAD where it was', () async {
+      commit('a.txt', '1', 'first');
+      final start = await service.currentBranchName(tmp);
+      await service.createBranch(repoDir: tmp, name: 'later', checkout: false);
+      expect(await service.currentBranchName(tmp), start);
+      expect(await service.branchLines(tmp), contains('  later'));
+    });
+
+    test('createBranch refuses duplicate and invalid names', () async {
+      commit('a.txt', '1', 'first');
+      await service.createBranch(repoDir: tmp, name: 'feature', checkout: false);
+      expect(
+        () => service.createBranch(repoDir: tmp, name: 'feature'),
+        throwsA(isA<StateError>().having((e) => e.message, 'message', contains('already exists'))),
+      );
+      expect(
+        () => service.createBranch(repoDir: tmp, name: 'bad name'),
+        throwsA(isA<StateError>().having((e) => e.message, 'message', contains('not a valid'))),
+      );
+      expect(
+        () => service.createBranch(repoDir: tmp, name: '  '),
+        throwsA(isA<StateError>()),
+      );
+    });
+
+    test('checking out another branch swaps the working tree', () async {
+      commit('a.txt', 'main content', 'first');
+      final start = await service.currentBranchName(tmp);
+      await service.createBranch(repoDir: tmp, name: 'side');
+      commit('side.txt', 'side only', 'on side');
+      expect(File('${tmp.path}/side.txt').existsSync(), isTrue);
+
+      expect(await service.checkoutBranch(repoDir: tmp, name: start), contains(start));
+      expect(await service.currentBranchName(tmp), start);
+      expect(File('${tmp.path}/side.txt').existsSync(), isFalse);
+    });
+
+    test('checkout refuses a dirty tree rather than eating the edits', () async {
+      commit('a.txt', '1', 'first');
+      final start = await service.currentBranchName(tmp);
+      await service.createBranch(repoDir: tmp, name: 'side');
+      File('${tmp.path}/a.txt').writeAsStringSync('uncommitted work');
+
+      expect(
+        () => service.checkoutBranch(repoDir: tmp, name: start),
+        throwsA(isA<StateError>().having((e) => e.message, 'message', contains('uncommitted change'))),
+      );
+      expect(File('${tmp.path}/a.txt').readAsStringSync(), 'uncommitted work');
+    });
+
+    test('checkout of an unknown branch is a plain error, not a crash', () async {
+      commit('a.txt', '1', 'first');
+      expect(
+        () => service.checkoutBranch(repoDir: tmp, name: 'nope'),
+        throwsA(isA<StateError>().having((e) => e.message, 'message', contains('No local branch'))),
+      );
+    });
+
+    test('discard deletes an untracked file — nothing to restore it from', () async {
+      commit('a.txt', '1', 'first');
+      File('${tmp.path}/junk.txt').writeAsStringSync('junk');
+
+      await service.discardChanges(repoDir: tmp, relativePath: 'junk.txt');
+
+      expect(File('${tmp.path}/junk.txt').existsSync(), isFalse);
+      expect(await service.statusLines(tmp), ['working tree clean']);
+    });
+
+    test('discard restores a tracked file from HEAD', () async {
+      commit('a.txt', 'committed\n', 'first');
+      File('${tmp.path}/a.txt').writeAsStringSync('local mess');
+
+      await service.discardChanges(repoDir: tmp, relativePath: 'a.txt');
+
+      expect(File('${tmp.path}/a.txt').readAsStringSync(), 'committed\n');
+      expect(await service.statusLines(tmp), ['working tree clean']);
+    });
+
+    test('discard brings back a tracked file that was deleted', () async {
+      commit('a.txt', 'committed\n', 'first');
+      File('${tmp.path}/a.txt').deleteSync();
+
+      await service.discardChanges(repoDir: tmp, relativePath: 'a.txt');
+
+      expect(File('${tmp.path}/a.txt').readAsStringSync(), 'committed\n');
+    });
+
+    test('discarding a path with nothing pending changes nothing', () async {
+      commit('a.txt', 'committed\n', 'first');
+      await service.discardChanges(repoDir: tmp, relativePath: 'a.txt');
+      expect(File('${tmp.path}/a.txt').readAsStringSync(), 'committed\n');
+    });
+
+    test('diff renders the pending edit, and says so when there is none', () async {
+      commit('a.txt', 'one\n', 'first');
+      expect(await service.diffLines(tmp), ['no changes']);
+
+      File('${tmp.path}/a.txt').writeAsStringSync('two\n');
+      final lines = await service.diffLines(tmp);
+      expect(lines.any((l) => l.startsWith('-one')), isTrue);
+      expect(lines.any((l) => l.startsWith('+two')), isTrue);
+    });
+
+    test('a single-file diff leaves the other changed files out', () async {
+      commit('a.txt', 'one\n', 'first');
+      commit('b.txt', 'bee\n', 'second');
+      File('${tmp.path}/a.txt').writeAsStringSync('changed\n');
+      File('${tmp.path}/b.txt').writeAsStringSync('also changed\n');
+
+      final onlyA = (await service.diffLines(tmp, relativePath: 'a.txt')).join('\n');
+      expect(onlyA, contains('a.txt'));
+      expect(onlyA, isNot(contains('b.txt')));
+
+      expect(
+        await service.diffLines(tmp, relativePath: 'not-touched.txt'),
+        ['no changes'],
+      );
+    });
+
+    test('deleting the local clone removes it and is quiet if already gone', () async {
+      final clone = Directory.systemTemp.createTempSync('pocket_git_clone');
+      File('${clone.path}/a.txt').writeAsStringSync('x');
+
+      await service.deleteLocalClone(clone);
+      expect(clone.existsSync(), isFalse);
+      await service.deleteLocalClone(clone); // no throw
     });
   });
 
@@ -273,8 +419,8 @@ void main() {
     }
 
     setUp(() {
-      bare = Directory.systemTemp.createTempSync('git_agent_app_bare');
-      work = Directory.systemTemp.createTempSync('git_agent_app_work');
+      bare = Directory.systemTemp.createTempSync('pocket_git_bare');
+      work = Directory.systemTemp.createTempSync('pocket_git_work');
       Repository.init(path: bare.path, bare: true).free();
       Repository.init(path: work.path).free();
       commitIn(work, 'a.txt', 'one', 'first');
@@ -298,13 +444,15 @@ void main() {
       File('${work.path}/a.txt').writeAsStringSync('two');
       File('${work.path}/b.txt').writeAsStringSync('new file');
       File('${work.path}/gone.txt').writeAsStringSync('x');
-      await service.commitAllAndPush(repoDir: work, message: 'add gone', token: '');
+      await service.commitAllAndPush(
+          repoDir: work, message: 'add gone', token: '', identity: testIdentity);
       File('${work.path}/gone.txt').deleteSync();
 
       final summary = await service.commitAllAndPush(
         repoDir: work,
         message: 'mixed change set',
         token: '',
+        identity: testIdentity,
       );
       expect(summary, contains('pushed to origin/'));
 
@@ -318,10 +466,85 @@ void main() {
       remote.free();
     });
 
+    test('committing selected files stages only those paths', () async {
+      File('${work.path}/a.txt').writeAsStringSync('edited');
+      File('${work.path}/b.txt').writeAsStringSync('not part of this commit');
+
+      final summary = await service.commitFilesAndPush(
+        repoDir: work,
+        relativePaths: ['a.txt'],
+        message: 'only a',
+        token: '',
+        identity: testIdentity,
+      );
+
+      expect(summary, contains('1 path(s)'));
+      // b.txt was never staged, so it is still pending afterwards.
+      expect(await service.statusLines(work), ['??  b.txt']);
+      final log = await service.recentCommits(work);
+      expect(log.first.message.trim(), 'only a');
+      expect(log.first.author, 'test');
+    });
+
+    test('committing selected files can record a deletion', () async {
+      File('${work.path}/a.txt').deleteSync();
+
+      await service.commitFilesAndPush(
+        repoDir: work,
+        relativePaths: ['a.txt'],
+        message: 'remove a',
+        token: '',
+        identity: testIdentity,
+      );
+
+      expect(await service.statusLines(work), ['working tree clean']);
+    });
+
+    test('an empty or already-clean selection is refused, not committed', () async {
+      expect(
+        () => service.commitFilesAndPush(
+          repoDir: work,
+          relativePaths: const [],
+          message: 'x',
+          token: '',
+          identity: testIdentity,
+        ),
+        throwsA(isA<StateError>().having((e) => e.message, 'message', contains('No files selected'))),
+      );
+
+      File('${work.path}/a.txt').writeAsStringSync('edited');
+      expect(
+        () => service.commitFilesAndPush(
+          repoDir: work,
+          relativePaths: const ['b.txt'],
+          message: 'x',
+          token: '',
+          identity: testIdentity,
+        ),
+        throwsA(isA<StateError>().having((e) => e.message, 'message', contains('pending changes'))),
+      );
+    });
+
+    test('push on its own retries the push without a new commit', () async {
+      File('${work.path}/a.txt').writeAsStringSync('edited');
+      await service.commitAllAndPush(
+          repoDir: work, message: 'edit', token: '', identity: testIdentity);
+      final tip = (await service.recentCommits(work)).first.sha;
+
+      expect(await service.pushCurrentBranch(repoDir: work, token: ''),
+          contains('Pushed'));
+
+      expect((await service.recentCommits(work)).first.sha, tip);
+      final remote = Repository.open(bare.path);
+      expect(remote.head.target.sha, tip);
+      remote.free();
+    });
+
     test('an untracked-only change set still counts as something to commit', () async {
       File('${work.path}/only-new.txt').writeAsStringSync('hi');
       expect(await service.statusLines(work), ['??  only-new.txt']);
-      await service.commitAllAndPush(repoDir: work, message: 'untracked', token: '');
+      await service.commitAllAndPush(
+          repoDir: work, message: 'untracked', token: '', identity: testIdentity);
       expect(await service.statusLines(work), ['working tree clean']);
     });
 
@@ -332,7 +555,7 @@ void main() {
       );
 
       // A second clone pushes a commit, so origin is genuinely ahead.
-      final other = Directory.systemTemp.createTempSync('git_agent_app_other');
+      final other = Directory.systemTemp.createTempSync('pocket_git_other');
       addTearDown(() => other.deleteSync(recursive: true));
       Repository.clone(url: bare.path, localPath: other.path).free();
       commitIn(other, 'c.txt', 'from elsewhere', 'remote work');
@@ -349,7 +572,7 @@ void main() {
     });
 
     test('pull refuses to merge diverged history instead of guessing', () async {
-      final other = Directory.systemTemp.createTempSync('git_agent_app_other');
+      final other = Directory.systemTemp.createTempSync('pocket_git_other');
       addTearDown(() => other.deleteSync(recursive: true));
       Repository.clone(url: bare.path, localPath: other.path).free();
       commitIn(other, 'c.txt', 'theirs', 'their work');

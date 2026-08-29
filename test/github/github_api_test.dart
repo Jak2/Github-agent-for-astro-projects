@@ -1,13 +1,13 @@
 // test/github/github_api_test.dart
 import 'package:flutter_test/flutter_test.dart';
-import 'package:git_agent_app/github/github_api.dart';
+import 'package:pocket_git/github/github_api.dart';
 
 void main() {
   test('parseRepoListJson maps GitHub API fields', () {
     final json = [
       {
-        'full_name': 'jak2/git_agent_app',
-        'clone_url': 'https://github.com/jak2/git_agent_app.git',
+        'full_name': 'jak2/pocket_git',
+        'clone_url': 'https://github.com/jak2/pocket_git.git',
         'default_branch': 'main',
       },
       {
@@ -20,8 +20,8 @@ void main() {
     final repos = parseRepoListJson(json);
 
     expect(repos, hasLength(2));
-    expect(repos[0].fullName, 'jak2/git_agent_app');
-    expect(repos[0].cloneUrl, 'https://github.com/jak2/git_agent_app.git');
+    expect(repos[0].fullName, 'jak2/pocket_git');
+    expect(repos[0].cloneUrl, 'https://github.com/jak2/pocket_git.git');
     expect(repos[0].defaultBranch, 'main');
     expect(repos[1].fullName, 'jak2/other_repo');
   });
@@ -50,7 +50,7 @@ void main() {
       bool? pushPermission,
     }) =>
         accessVerdictLines(
-          repoFullName: 'jak2/git_agent_app',
+          repoFullName: 'jak2/pocket_git',
           userStatus: userStatus,
           scopesHeader: scopesHeader,
           repoStatus: repoStatus,
@@ -81,7 +81,7 @@ void main() {
     test('push granted reads as granted and offers no fix', () {
       final lines = verdict(scopesHeader: 'repo', pushPermission: true).join('\n');
       expect(lines, contains('Token: valid'));
-      expect(lines, contains('Push to jak2/git_agent_app: GRANTED.'));
+      expect(lines, contains('Push to jak2/pocket_git: GRANTED.'));
       expect(lines, isNot(contains('Fix:')));
     });
 
@@ -108,6 +108,50 @@ void main() {
       final lines = verdict(scopesHeader: 'repo', pushPermission: false).join('\n');
       expect(lines, isNot(contains('ghp_')));
       expect(lines, isNot(contains('Bearer')));
+    });
+  });
+
+  group('parseUserJson', () {
+    test('reads the account straight through when GitHub gives everything', () {
+      final user = parseUserJson({
+        'login': 'jak2',
+        'id': 12345,
+        'name': 'Jaya Arun Kumar Tulluri',
+        'email': 'jaya@example.com',
+      });
+      expect(user.login, 'jak2');
+      expect(user.name, 'Jaya Arun Kumar Tulluri');
+      expect(user.email, 'jaya@example.com');
+    });
+
+    test('a hidden email falls back to the GitHub noreply address', () {
+      final user = parseUserJson({'login': 'jak2', 'id': 12345, 'email': null});
+      expect(user.email, '12345+jak2@users.noreply.github.com');
+    });
+
+    test('a missing profile name falls back to the login', () {
+      final user = parseUserJson({'login': 'jak2', 'id': 1, 'name': null});
+      expect(user.name, 'jak2');
+    });
+
+    test('a blank name or email is treated as absent, not committed as blank', () {
+      final user = parseUserJson({
+        'login': 'jak2',
+        'id': 1,
+        'name': '   ',
+        'email': '',
+      });
+      expect(user.name, 'jak2');
+      expect(user.email, '1+jak2@users.noreply.github.com');
+    });
+
+    test('no id still yields a usable noreply address', () {
+      final user = parseUserJson({'login': 'jak2'});
+      expect(user.email, 'jak2@users.noreply.github.com');
+    });
+
+    test('a response without a login is refused rather than half-parsed', () {
+      expect(() => parseUserJson({'id': 1}), throwsA(isA<StateError>()));
     });
   });
 }

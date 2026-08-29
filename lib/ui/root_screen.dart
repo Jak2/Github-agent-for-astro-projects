@@ -1,11 +1,13 @@
 // lib/ui/root_screen.dart
 import 'package:flutter/material.dart';
+
 import '../secrets/secret_store.dart';
 import '../theme/app_theme.dart';
-import 'config_screen.dart';
-import 'general_chat_screen.dart';
-import 'github_tab_screen.dart';
+import 'repos_screen.dart';
+import 'settings_screen.dart';
 
+/// Two tabs and nothing else: the repositories, and the account they come
+/// from. Every other surface in this app is a popup over one of them.
 class RootScreen extends StatefulWidget {
   final SecretStore secretStore;
   const RootScreen({super.key, required this.secretStore});
@@ -17,20 +19,26 @@ class RootScreen extends StatefulWidget {
 class _RootScreenState extends State<RootScreen> {
   int _tabIndex = 0;
 
+  /// Bumped whenever the token or identity changes, so the repos tab rebuilds
+  /// from scratch instead of showing the previous account's list.
+  int _accountEpoch = 0;
+
   @override
   Widget build(BuildContext context) {
     final tabs = [
-      GeneralChatScreen(
+      ReposScreen(
+        key: ValueKey(_accountEpoch),
         secretStore: widget.secretStore,
-        onSwitchTab: (index) => setState(() => _tabIndex = index),
+        onOpenSettings: () => setState(() => _tabIndex = 1),
       ),
-      GithubTabScreen(secretStore: widget.secretStore),
-      ConfigScreen(secretStore: widget.secretStore),
+      SettingsScreen(
+        secretStore: widget.secretStore,
+        onAccountChanged: () => setState(() => _accountEpoch++),
+      ),
     ];
     final navItems = [
-      (icon: Icons.chat_bubble_outline, label: 'Chat'),
-      (icon: Icons.hub_outlined, label: 'GitHub'),
-      (icon: Icons.tune, label: 'Config'),
+      (icon: Icons.folder_copy_outlined, label: 'Repos'),
+      (icon: Icons.tune, label: 'Settings'),
     ];
 
     return Scaffold(

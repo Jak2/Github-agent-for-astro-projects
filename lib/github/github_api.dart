@@ -77,6 +77,47 @@ List<String> accessVerdictLines({
   return lines;
 }
 
+/// The GitHub account a token belongs to. Commits are authored as this
+/// account, so [name] and [email] always resolve to something usable — GitHub
+/// returns null for both on accounts that hide them.
+class GithubUser {
+  final String login;
+  final String name;
+  final String email;
+
+  const GithubUser({required this.login, required this.name, required this.email});
+}
+
+/// Pure so the fallbacks can be tested without a network call.
+///
+/// A blank string is treated as absent: committing with an empty author name
+/// or email produces a commit GitHub will not attribute to anyone.
+GithubUser parseUserJson(Map<String, dynamic> json) {
+  final login = json['login'];
+  if (login is! String || login.trim().isEmpty) {
+    throw StateError('GitHub returned an account with no login.');
+  }
+
+  String? textOrNull(Object? value) {
+    if (value is! String) return null;
+    final trimmed = value.trim();
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  final id = json['id'];
+  // The address GitHub itself uses for accounts with a private email. Without
+  // the numeric id it is still valid, just not linkable back to the account.
+  final noreply = id == null
+      ? '$login@users.noreply.github.com'
+      : '$id+$login@users.noreply.github.com';
+
+  return GithubUser(
+    login: login,
+    name: textOrNull(json['name']) ?? login,
+    email: textOrNull(json['email']) ?? noreply,
+  );
+}
+
 class GithubApi {
   final Dio client;
   final String token;
@@ -112,15 +153,47 @@ class GithubApi {
     );
   }
 
-  Future<List<GithubRepo>> listRepos() async {
+  /// Who this token belongs to. Doubles as token validation: Settings calls it
+  /// before writing the PAT to the keystore.
+  Future<GithubUser> currentUser() async {
     final response = await client.get(
-      'https://api.github.com/user/repos',
-      options: Options(headers: {
-        'Authorization': 'Bearer $token',
-        'Accept': 'application/vnd.github+json',
-      }),
-      queryParameters: {'per_page': 100, 'sort': 'updated'},
+      'https://api.github.com/user',
+      options: _authOptions(),
     );
-    return parseRepoListJson(response.data as List<dynamic>);
+    final status = response.statusCode ?? 0;
+    if (status != 200) {
+      throw StateError('GitHub rejected the token (HTTP $status).');
+    }
+    final data = response.data;
+    if (data is! Map) {
+      throw StateError('GitHub returned an unexpected response for this token.');
+    }
+    return parseUserJson(Map<String, dynamic>.from(data));
+  }
+
+  /// Every repository the token can see.
+  ///
+  /// GitHub caps a page at 100. Stopping there would silently hide the rest of
+  /// an account's repositories — including from the search box, which only
+  /// filters what was fetched — so this walks pages until one comes back
+  /// short. [maxPages] is a backstop against an endless loop, not a limit
+  /// anyone is expected to hit.
+  Future<List<GithubRepo>> listRepos({int maxPages = 10}) async {
+    const perPage = 100;
+    final all = <GithubRepo>[];
+    for (var page = 1; page <= maxPages; page++) {
+      final response = await client.get(
+        'https://api.github.com/user/repos',
+        options: Options(headers: {
+          'Authorization': 'Bearer $token',
+          'Accept': 'application/vnd.github+json',
+        }),
+        queryParameters: {'per_page': perPage, 'sort': 'updated', 'page': page},
+      );
+      final batch = parseRepoListJson(response.data as List<dynamic>);
+      all.addAll(batch);
+      if (batch.length < perPage) break;
+    }
+    return all;
   }
 }

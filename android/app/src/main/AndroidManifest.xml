@@ -1,6 +1,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Every clone, pull and push is HTTPS to GitHub. The debug and profile
+         manifests declare this too; a release build has only this one. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
-        android:label="git_agent_app"
+        android:label="PocketGit"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

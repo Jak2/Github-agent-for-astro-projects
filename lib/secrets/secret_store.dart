@@ -1,11 +1,11 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 const secretKeyGithubPat = 'github_pat';
-const secretKeyCloudApiKey = 'cloud_api_key';
 
 abstract class SecretStore {
   Future<String?> read(String key);
   Future<void> write(String key, String value);
+  Future<void> delete(String key);
 }
 
 class SecureSecretStore implements SecretStore {
@@ -19,4 +19,7 @@ class SecureSecretStore implements SecretStore {
 
   @override
   Future<void> write(String key, String value) => _storage.write(key: key, value: value);
+
+  @override
+  Future<void> delete(String key) => _storage.delete(key: key);
 }

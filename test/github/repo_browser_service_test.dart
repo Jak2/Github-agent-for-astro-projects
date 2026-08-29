@@ -1,8 +1,9 @@
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:git_agent_app/github/github_repo.dart';
-import 'package:git_agent_app/github/repo_browser_service.dart';
-import 'package:git_agent_app/secrets/secret_store.dart';
+import 'package:pocket_git/github/github_repo.dart';
+import 'package:pocket_git/git/repo_paths.dart';
+import 'package:pocket_git/github/repo_browser_service.dart';
+import 'package:pocket_git/secrets/secret_store.dart';
 
 class _FakeSecretStore implements SecretStore {
   final Map<String, String> _values;
@@ -13,6 +14,9 @@ class _FakeSecretStore implements SecretStore {
 
   @override
   Future<void> write(String key, String value) async => _values[key] = value;
+
+  @override
+  Future<void> delete(String key) async => _values.remove(key);
 }
 
 void main() {
@@ -40,9 +44,9 @@ void main() {
       const GithubRepo(fullName: 'jak2/cloned-repo', cloneUrl: 'https://x/cloned', defaultBranch: 'main'),
       const GithubRepo(fullName: 'jak2/fresh-repo', cloneUrl: 'https://x/fresh', defaultBranch: 'main'),
     ];
-    // Pre-create the "already cloned" repo's local directory using the same
-    // naming scheme repoDirectory()/localCloneDirName() produce.
-    await Directory('${tempDir.path}/jak2_cloned-repo').create(recursive: true);
+    // Pre-create the "already cloned" repo's local directory through the same
+    // helper the production path uses, so the layout cannot drift apart.
+    await (await repoDirectory(tempDir, 'jak2/cloned-repo')).create(recursive: true);
 
     final result = await loadReposWithCloneStatus(
       secretStore: secretStore,

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:git2dart/git2dart.dart';
 
 import '../github/github_repo.dart';
+import 'git_identity.dart';
 import 'repo_paths.dart';
 
 /// Clones/commits/pushes a [GithubRepo] using git2dart (real libgit2 FFI
@@ -28,63 +29,70 @@ class RepoGitService {
     }
     await dir.create(recursive: true);
 
-    final repository = Repository.clone(
-      url: repo.cloneUrl,
-      localPath: dir.path,
-      checkoutBranch: repo.defaultBranch,
-      callbacks: _tokenCallbacks(token),
-    );
-    repository.free();
+    try {
+      // ponytail: libgit2 is synchronous FFI on the main isolate — a large
+      // clone blocks the UI thread and can ANR. Moving it to an isolate means
+      // re-opening the repo there (git2dart handles do not travel); do that if
+      // real repos prove slow enough to matter.
+      final repository = Repository.clone(
+        url: repo.cloneUrl,
+        localPath: dir.path,
+        checkoutBranch: repo.defaultBranch,
+        callbacks: _tokenCallbacks(token),
+      );
+      repository.free();
+    } catch (_) {
+      // A half-written directory still passes the exists() check the repo list
+      // uses to decide what is cloned, so a failed clone would show as cloned
+      // forever and never open.
+      if (await dir.exists()) await dir.delete(recursive: true);
+      rethrow;
+    }
 
     return dir;
   }
 
-  Future<void> commitAndPush({
+  Signature _signature(CommitIdentity identity) =>
+      Signature.create(name: identity.name, email: identity.email);
+
+  /// Pushes the checked-out branch to origin and returns its name.
+  ///
+  /// The token only ever reaches libgit2 through [_tokenCallbacks]; nothing
+  /// here puts it in a string.
+  String _pushHead(Repository repository, String token) {
+    final branch = repository.head.shorthand;
+    final remote = Remote.lookup(repo: repository, name: 'origin');
+    try {
+      remote.push(
+        refspecs: ['refs/heads/$branch:refs/heads/$branch'],
+        callbacks: _tokenCallbacks(token),
+      );
+    } finally {
+      remote.free();
+    }
+    return branch;
+  }
+
+  /// Pushes the current branch without committing anything.
+  ///
+  /// The retry path: the commit landed locally and only the push failed, so
+  /// re-committing would be wrong.
+  Future<String> pushCurrentBranch({
     required Directory repoDir,
-    required String relativeFilePath,
-    required String content,
-    required String commitMessage,
     required String token,
   }) async {
-    // ponytail: no rollback on partial failure (file written/committed but push fails) —
-    // repo is left dirty locally, next run's write+commit will just create a new commit
-    // on top; add cleanup if this proves confusing in practice.
     final repository = Repository.open(repoDir.path);
     try {
-      final file = File('${repoDir.path}/$relativeFilePath');
-      await file.create(recursive: true);
-      await file.writeAsString(content);
-
-      final author = Signature.create(
-        name: 'git_agent_app',
-        email: 'git_agent_app@users.noreply.github.com',
-      );
-
-      repository.createCommitOnHead(
-        [relativeFilePath],
-        author,
-        author,
-        commitMessage,
-      );
-
-      final remote = Remote.lookup(repo: repository, name: 'origin');
-      try {
-        final branch = repository.head.shorthand;
-        remote.push(
-          refspecs: ['refs/heads/$branch:refs/heads/$branch'],
-          callbacks: _tokenCallbacks(token),
-        );
-      } finally {
-        remote.free();
-      }
+      final branch = _pushHead(repository, token);
+      return 'Pushed $branch to origin.';
     } finally {
       repository.free();
     }
   }
 
   // ---------------------------------------------------------------------
-  // Chip actions. Deterministic git, driven from buttons — none of this
-  // goes anywhere near a prompt.
+  // Read-only inspection. Every one of these backs a button in the repo
+  // screen and renders into a popup.
   // ---------------------------------------------------------------------
 
   /// `git status --short`, already formatted for display.
@@ -186,6 +194,7 @@ class RepoGitService {
     required Directory repoDir,
     required String message,
     required String token,
+    required CommitIdentity identity,
   }) async {
     final repository = Repository.open(repoDir.path);
     try {
@@ -200,10 +209,7 @@ class RepoGitService {
       index.write();
       final treeOid = index.writeTree();
 
-      final author = Signature.create(
-        name: 'git_agent_app',
-        email: 'git_agent_app@users.noreply.github.com',
-      );
+      final author = _signature(identity);
       final oid = Commit.create(
         repo: repository,
         updateRef: 'HEAD',
@@ -211,19 +217,11 @@ class RepoGitService {
         committer: author,
         message: message,
         tree: Tree.lookup(repo: repository, oid: treeOid),
-        parents: [repository.headCommit],
+        // An unborn HEAD (freshly cloned empty repo) has no parent to point at.
+        parents: repository.isEmpty ? const [] : [repository.headCommit],
       );
 
-      final branch = repository.head.shorthand;
-      final remote = Remote.lookup(repo: repository, name: 'origin');
-      try {
-        remote.push(
-          refspecs: ['refs/heads/$branch:refs/heads/$branch'],
-          callbacks: _tokenCallbacks(token),
-        );
-      } finally {
-        remote.free();
-      }
+      final branch = _pushHead(repository, token);
 
       return 'Committed ${pending.length} path(s) as ${shortSha(oid.sha)} '
           'and pushed to origin/$branch.';
@@ -242,8 +240,10 @@ class RepoGitService {
   }) async {
     final repository = Repository.open(repoDir.path);
     try {
-      // A forced checkout onto a dirty tree silently eats local edits.
-      final dirty = repository.status;
+      // A forced checkout onto a dirty tree silently eats local edits — and
+      // an untracked file the remote also adds is overwritten just as
+      // quietly, so the guard uses the merged status, not libgit2's default.
+      final dirty = _fullStatus(repository);
       if (dirty.isNotEmpty) {
         throw StateError(
           'Working tree has ${dirty.length} uncommitted change(s) — '
@@ -288,6 +288,256 @@ class RepoGitService {
       return 'Fast-forwarded $branch to ${shortSha(target.sha)}.';
     } finally {
       repository.free();
+    }
+  }
+
+  /// Stages only [relativePaths], commits them and pushes.
+  ///
+  /// The selective half of commit & push: anything not named stays pending.
+  ///
+  /// Throws [StateError] when nothing was selected, or when none of the
+  /// selected paths actually have pending changes — committing an empty tree
+  /// delta is a confusing no-op, not a success.
+  Future<String> commitFilesAndPush({
+    required Directory repoDir,
+    required List<String> relativePaths,
+    required String message,
+    required String token,
+    required CommitIdentity identity,
+  }) async {
+    if (relativePaths.isEmpty) {
+      throw StateError('No files selected — nothing to commit.');
+    }
+    final repository = Repository.open(repoDir.path);
+    try {
+      final pending = _fullStatus(repository);
+      final selected =
+          relativePaths.where(pending.containsKey).toList()..sort();
+      if (selected.isEmpty) {
+        throw StateError(
+          'None of the selected files have pending changes.',
+        );
+      }
+
+      final index = repository.index;
+      for (final path in selected) {
+        // A path that is pending but gone from disk was deleted: staging it
+        // means removing it from the index, not adding it.
+        if (File('${repoDir.path}/$path').existsSync()) {
+          index.add(path);
+        } else {
+          index.remove(path);
+        }
+      }
+      index.write();
+
+      final author = _signature(identity);
+      final oid = Commit.create(
+        repo: repository,
+        updateRef: 'HEAD',
+        author: author,
+        committer: author,
+        message: message,
+        tree: Tree.lookup(repo: repository, oid: index.writeTree()),
+        // An unborn HEAD (freshly cloned empty repo) has no parent to point at.
+        parents: repository.isEmpty ? const [] : [repository.headCommit],
+      );
+
+      final branch = _pushHead(repository, token);
+
+      return 'Committed ${selected.length} path(s) as ${shortSha(oid.sha)} '
+          'and pushed to origin/$branch.';
+    } finally {
+      repository.free();
+    }
+  }
+
+  /// The checked-out branch.
+  Future<String> currentBranchName(Directory repoDir) async {
+    final repository = Repository.open(repoDir.path);
+    try {
+      if (repository.isBranchUnborn) {
+        // libgit2 refuses to resolve an unborn HEAD, but the file still names
+        // the branch the first commit will land on.
+        final head = File('${repository.path}HEAD').readAsStringSync().trim();
+        const prefix = 'ref: refs/heads/';
+        return head.startsWith(prefix) ? head.substring(prefix.length) : 'HEAD';
+      }
+      return repository.head.shorthand;
+    } finally {
+      repository.free();
+    }
+  }
+
+  /// Creates a branch at the current commit, and switches to it by default.
+  ///
+  /// The switch only moves HEAD: the new branch points at the commit already
+  /// checked out, so the working tree is already correct and uncommitted work
+  /// carries over — exactly like `git checkout -b`.
+  ///
+  /// Throws [StateError] on an invalid or already-used name.
+  Future<String> createBranch({
+    required Directory repoDir,
+    required String name,
+    bool checkout = true,
+  }) async {
+    final trimmed = name.trim();
+    if (trimmed.isEmpty || !Branch.isNameValid(trimmed)) {
+      throw StateError('"$name" is not a valid branch name.');
+    }
+    final repository = Repository.open(repoDir.path);
+    try {
+      if (repository.isEmpty) {
+        throw StateError('This repository has no commits to branch from.');
+      }
+      if (repository.references.contains('refs/heads/$trimmed')) {
+        throw StateError('Branch "$trimmed" already exists.');
+      }
+
+      Branch.create(
+        repo: repository,
+        name: trimmed,
+        target: repository.headCommit,
+      ).free();
+
+      if (checkout) {
+        repository.setHead('refs/heads/$trimmed');
+        return 'Created $trimmed and switched to it.';
+      }
+      return 'Created $trimmed.';
+    } finally {
+      repository.free();
+    }
+  }
+
+  /// Switches to an existing local branch.
+  ///
+  /// Throws [StateError] when the tree is dirty: switching branches for real
+  /// rewrites the working tree, and a forced checkout eats uncommitted work.
+  Future<String> checkoutBranch({
+    required Directory repoDir,
+    required String name,
+  }) async {
+    final repository = Repository.open(repoDir.path);
+    try {
+      final refName = 'refs/heads/$name';
+      if (!repository.references.contains(refName)) {
+        throw StateError('No local branch named "$name".');
+      }
+      if (repository.head.shorthand == name) {
+        return 'Already on $name.';
+      }
+      final dirty = _fullStatus(repository);
+      if (dirty.isNotEmpty) {
+        throw StateError(
+          'Working tree has ${dirty.length} uncommitted change(s) — '
+          'commit or discard them before switching branches.',
+        );
+      }
+
+      Checkout.reference(repo: repository, name: refName);
+      repository.setHead(refName);
+      return 'Switched to $name.';
+    } finally {
+      repository.free();
+    }
+  }
+
+  /// Throws away the pending change to one path.
+  ///
+  /// An untracked file has no committed version to go back to, so the only
+  /// way to discard it is to delete it; anything tracked is restored from
+  /// HEAD, which also unstages it.
+  Future<void> discardChanges({
+    required Directory repoDir,
+    required String relativePath,
+  }) async {
+    final repository = Repository.open(repoDir.path);
+    try {
+      final flags = _fullStatus(repository)[relativePath];
+      if (flags == null) return; // nothing pending for this path
+
+      if (flags.contains(GitStatus.wtNew) &&
+          !flags.contains(GitStatus.indexNew)) {
+        final file = File('${repoDir.path}/$relativePath');
+        if (file.existsSync()) file.deleteSync();
+        return;
+      }
+
+      if (flags.contains(GitStatus.indexNew)) {
+        // Staged but never committed: HEAD has nothing to restore, so drop the
+        // index entry and the file with it.
+        final index = repository.index;
+        index.remove(relativePath);
+        index.write();
+        final file = File('${repoDir.path}/$relativePath');
+        if (file.existsSync()) file.deleteSync();
+        return;
+      }
+
+      Checkout.head(
+        repo: repository,
+        strategy: const {GitCheckout.force},
+        paths: [relativePath],
+      );
+    } finally {
+      repository.free();
+    }
+  }
+
+  /// The working tree as a unified patch against HEAD (index included), so
+  /// the user can read exactly what a commit would contain.
+  ///
+  /// Pass [relativePath] for a single file. Never empty: no diff says so.
+  Future<List<String>> diffLines(
+    Directory repoDir, {
+    String? relativePath,
+  }) async {
+    final repository = Repository.open(repoDir.path);
+    try {
+      final diff = Diff.treeToWorkdirWithIndex(
+        repo: repository,
+        tree: repository.isEmpty ? null : repository.headCommit.tree,
+        flags: const {
+          GitDiff.includeUntracked,
+          GitDiff.recurseUntrackedDirs,
+          GitDiff.showUntrackedContent,
+        },
+      );
+
+      final String text;
+      if (relativePath == null) {
+        text = diff.patch;
+      } else {
+        // libgit2's diff options take no pathspec through git2dart, so the
+        // single-file view filters the patches it produced.
+        final buffer = StringBuffer();
+        for (final patch in diff.patches) {
+          final delta = patch.delta;
+          if (delta.newFile.path == relativePath ||
+              delta.oldFile.path == relativePath) {
+            buffer.write(patch.text);
+          }
+          patch.free();
+        }
+        text = buffer.toString();
+      }
+      diff.free();
+
+      final lines = text.split('\n');
+      while (lines.isNotEmpty && lines.last.isEmpty) {
+        lines.removeLast();
+      }
+      return lines.isEmpty ? const ['no changes'] : lines;
+    } finally {
+      repository.free();
+    }
+  }
+
+  /// Deletes the local clone. The remote is untouched.
+  Future<void> deleteLocalClone(Directory repoDir) async {
+    if (await repoDir.exists()) {
+      await repoDir.delete(recursive: true);
     }
   }
 }

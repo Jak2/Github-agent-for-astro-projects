@@ -1,7 +1,7 @@
 // test/files/file_tree_test.dart
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:git_agent_app/files/file_tree.dart';
+import 'package:pocket_git/files/file_tree.dart';
 
 void main() {
   test('buildFileTree reflects nested directory structure with relative paths', () async {

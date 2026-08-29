@@ -1,101 +1,77 @@
-# git_agent_app
+# PocketGit
 
-A small Android app: clone a GitHub repo, restructure a file's content with an LLM
-following a bundled rule set, refine the result in a chat, and push it back to the repo.
+A small Android app for the one thing a phone is actually good for in a git
+workflow: **see your repositories, write a file, push it.**
 
-This is v1 — a single focused pipeline, not a general git client or agent framework.
-See `docs/` for the full design history and decisions.
+No AI, no chat, no agents — every action is a deterministic git operation behind
+a button, and every result comes back in a popup.
 
 ## What it does
 
-1. **Connect GitHub** — paste a Personal Access Token in Settings.
-2. **Browse & clone** — pick one of your repos from a list; it's cloned to the app's
-   local storage.
-3. **Pick a file** — browse the cloned repo's file tree and tap a file.
-4. **Structure it** — the file's content plus a bundled `structure.md` rule set are
-   sent to an LLM (cloud API or an on-device `.gguf` model), which returns restructured
-   Markdown.
-5. **Refine in chat** — ask for changes ("make it shorter", "add a summary section")
-   and the LLM regenerates; keep going until it's right.
-6. **Push it back** — tell the app where to save it (type a path in chat, or browse
-   the repo tree to pick a folder), then tap Push. The app commits and pushes to the
-   repo over HTTPS.
+1. **Connect GitHub** — paste a Personal Access Token in Settings. The token is
+   validated against the GitHub API before it is stored, and it lives in the
+   device keystore (`flutter_secure_storage`), never in shared preferences.
+   Commits are authored as the GitHub account the token belongs to.
+2. **See your repositories** — every repo the token can reach, searchable, each
+   marked cloned or not.
+3. **Clone one** — into the app's private storage. Re-clone or delete the local
+   clone from the same row.
+4. **Handle files** — browse the tree, create a new file at any repo-relative
+   path, edit it, rename it, delete it, import one from device storage, discard
+   changes. Binary files are refused by the editor rather than corrupted.
+5. **Run git** — status, log, diff, branches (switch and create), pull
+   (fast-forward only), commit and push (everything, or just the file you were
+   working on), and "Check access" when GitHub refuses a push.
+
+## Design rules
+
+- **Popups are the only output surface.** There is no scrollback: a git result,
+  a refusal and an error all arrive in the same framed card.
+- **The token is never rendered.** Every error message is passed through
+  `redactSecrets` before it reaches a widget.
+- **Destructive actions stop and ask.** Delete a file, discard changes, delete a
+  clone, push — each one confirms first.
+- **Fast-forward only, never merge.** `pull` refuses rather than guessing at a
+  merge; divergence is a job for a real git client.
 
 ## Stack
 
-- Flutter 3.47.0 / Dart 3.13.0
-- `git2dart` + `git2dart_binaries` — FFI bindings to real libgit2 for clone/commit/push
-- `dio` — GitHub REST API + cloud LLM HTTP calls
-- `llama_cpp_dart` — on-device `.gguf` inference
-- `flutter_secure_storage` — encrypted storage for the GitHub PAT and cloud API key
-- `shared_preferences`, `file_picker`, `share_plus`, `path_provider`
-
-See `docs/decision.md` for why `git2dart` specifically (two other git libraries were
-tried and rejected during implementation because they turned out to not actually work).
+- Flutter 3.47 / Dart 3.13
+- `git2dart` + `git2dart_binaries` — real libgit2 over FFI for clone / commit /
+  push / branch / diff
+- `dio` — GitHub REST API
+- `flutter_secure_storage` — the PAT
+- `shared_preferences` — commit identity cache
+- `file_picker`, `share_plus`, `path_provider`, `path`, `google_fonts`
 
 ## Building & running
 
 ```bash
-export PATH="$PATH:/home/asterisk/develop/flutter/bin"   # or wherever your Flutter SDK lives
+export PATH="$PATH:/home/asterisk/develop/flutter/bin"
 flutter pub get
-flutter run   # or: flutter build apk --debug
+flutter run          # or: flutter build apk --debug
 ```
 
-### Known environment gotchas (not app bugs)
+If the project sits on an NTFS/exFAT mount, `chmod +x` is a no-op there and
+Flutter cannot exec `android/gradlew` directly — build with
+`bash android/gradlew assembleDebug` instead.
 
-- **If the project lives on an NTFS/exFAT mount** (`chmod +x` is a no-op there),
-  Flutter's tooling can't exec `android/gradlew` directly. Build via
-  `bash android/gradlew assembleDebug` instead of `flutter build apk` in that case.
-- **`llama_cpp_dart` needs a one-time manual step, once per machine.** It vendors
-  `llama.cpp` as a git submodule that pub.dev's package archive doesn't include, so the
-  on-device build fails with a CMake `add_subdirectory` error until you clone it — and
-  the package then needs pinning plus two patches, or on-device model loading appears to
-  hang for 300 seconds:
-  ```bash
-  git clone https://github.com/ggml-org/llama.cpp.git \
-    ~/.pub-cache/hosted/pub.dev/llama_cpp_dart-0.0.9/src/llama.cpp
-  bash scripts/setup_llama_cpp_dart.sh   # pins llama.cpp + patches the package
-  ```
-  Re-run the script after `dart pub cache repair` (it's idempotent), then do a clean
-  native rebuild. Why it's needed: `docs/on_device_load_hang_rootcause.md`. Note the
-  clone must be a full clone, not `--depth 1`, since the script checks out a pinned
-  commit.
-- **`compileSdk` mismatch on `llama_cpp_dart`.** Already fixed in
-  `android/build.gradle.kts` (forces `compileSdk 36` on every Android library
-  subproject) — no action needed, just don't remove that block.
+## Token
 
-Full details, including every deviation found during implementation, are in
-`docs/implementation.md`.
+Generate at github.com/settings/tokens:
 
-## Configuration
+- classic token with the **`repo`** scope, or
+- fine-grained token with **Contents: Read and write** on the repositories you
+  want to push to.
 
-Open the app's Settings screen (gear icon) to set:
+"Check access" in the repo screen tells you which of those is missing when a
+push comes back 403.
 
-- **GitHub Personal Access Token** — generate one at github.com/settings/tokens with
-  `repo` scope, paste it in.
-- **LLM engine** — Cloud API (endpoint, API key, model name, optional extra headers)
-  or On-device (pick a local `.gguf` file).
-- **structure.md** — the bundled default ships in the app; import a replacement from
-  local storage, or export the currently active one to share/save it.
+## History
 
-## Status
-
-v1 is fully implemented and passing its test suite (see `docs/status_open_points.md`
-for the current blocker: a live clone/push against a real GitHub remote from the
-installed app hasn't been confirmed yet). Not in scope for v1: OAuth login, a
-skills/sub-agent library, LangChain/LangGraph integration, or a generic git UI beyond
-commit+push of one file — see `docs/status_open_points.md` for the full deferred list.
-
-## Docs
-
-- `docs/discussion.md` — how the idea was scoped down to v1
-- `docs/decision.md` — every architecture decision and why, including two git-library
-  swaps discovered mid-implementation
-- `docs/design_theory.md` — the principles behind those decisions, plus the visual
-  system (colour, type, components) and native-dependency discipline
-- `docs/implementation.md` — what was actually built, task by task, plus real bugs
-  caught along the way
-- `docs/status_open_points.md` — current status, deferred features, open risks
-- `docs/superpowers/specs/` — the approved design spec
-- `docs/superpowers/plans/` — the implementation plan the code was built from
-# Github-agent-for-astro-projects
+PocketGit was rebuilt out of an earlier prototype that cloned a repo,
+restructured a file with an LLM and pushed the result. All LLM code — engines,
+prompts, personas, on-device inference — has been removed; what remains is the
+git and file half, promoted to the whole app. The prototype's design documents
+are kept under `docs/legacy_prototype/` for the decision history, notably why
+`git2dart`, after two other git libraries failed.
