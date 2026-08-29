@@ -45,50 +45,97 @@
   destructive-reclone race, both confirmed fixed). See `implementation.md`'s
   Change log for details.
 
-## Planned work — raised 2026-08-25 (design approved, not yet implemented)
+- 2026-08-25/26: **Generation observability, multi-LLM, pinning, file writing and a
+  git action bar** — a large block of work, all implemented and committed. Spec:
+  `docs/superpowers/specs/2026-08-25-multi-llm-observability-agent-controls-design.md`,
+  plan: `docs/superpowers/plans/2026-08-25-generation-observability.md`. Test suite
+  grew 63 -> 265. Highlights:
+  - **The "silent LLM" was never stuck.** It generated the whole time at 0.43 tok/s
+    behind an API that returned only at completion. Two real causes: debug APKs built
+    llama.cpp at `-O0` (forcing `-O3` gave ~2.5 tok/s, ~6x), and nothing stopped
+    generation, so the model role-played both sides of the transcript. Full writeup in
+    `on_device_load_hang_rootcause.md` and `implementation.md`.
+  - `LlmEngine` gained an event stream: tokens render live, with a real status line
+    (`model ready -> prompt sent -> generating (N tokens)`), a stop button, and no
+    reachable blank bubble.
+  - `LlmLibrary` — saving an LLM no longer replaces the previous one; on-device and
+    cloud entries live in one list, switching unloads the old model first.
+  - Chat UX: live CPU/RAM from `/proc/self`, uniform scroll-to-newest, collapsible
+    folders, and **pinning** a repo/folder/file to scope what the LLM is asked about.
+  - The assistant can create files in the local clone via a fenced `create-file` block,
+    behind an editable confirm card; plus deterministic **New file** / **New folder**
+    actions and a repo folder picker.
+  - **Git action bar in chat** (Status, Log, Branches, New file, New folder,
+    Check access, Pull, Commit & push) — deliberately buttons, not prompt-driven, so
+    they cost zero tokens and cannot be hallucinated.
+  - Real LangChain backend (`langchain` 0.8.1 + a `SimpleChatModel` adapter over our
+    engines) and an in-app graph engine (`lib/agent/graph_engine.dart`).
 
-Eight items raised together; specced as five independent subsystems plus one
-blocking bug in
+- 2026-08-26: **Live GitHub push verified end-to-end** — `Committed 2 path(s) as
+  99d3831 and pushed to origin/main` from the installed app against `Jak2/Blog`. This
+  closes the project's longest-standing blocker. It first failed with HTTP 403; the
+  cause was the fine-grained PAT lacking write, not the app. See the Check access note
+  under "Risks to watch".
+
+## Delivered from the 2026-08-25 plan
+
+Eight items raised together, specced as five subsystems plus one blocking bug in
 `superpowers/specs/2026-08-25-multi-llm-observability-agent-controls-design.md`.
 
-| Phase | Item | Notes |
+| Phase | Item | Status |
 |---|---|---|
-| **0** | **BUG: on-device LLM produces no output at all** — silent past 10 min, no error | Highest priority. `generate()` buffers the whole response and returns only at completion, so a working slow generation and a dead hang look identical. |
-| **1** | Per-step / per-token generation visibility | Same code change as Phase 0: `LlmEngine` gains an event stream; chat renders tokens live plus a real status line. |
-| **2** | Multi-LLM library — adding an LLM currently **replaces** the existing one | New `lib/settings/llm_library.dart`; one list holding both on-device and cloud entries. Switching auto-unloads the previous model. Deletion made explicit about whether the file is removed from disk. |
-| **3a** | Live CPU/RAM in the chat top bar | This app's own usage from `/proc/self`, no new dependency. Never a fabricated number. |
-| **3b–c** | Scroll to newest content after repo selection and icon interactions | Applied to all insertions, not special-cased. |
-| **3d** | Collapsible folders in the file tree | Feasibility gate: needs real widgets over `lib/files/file_tree.dart`. If the tree is flat text today, the display is rebuilt (text path for LLM context stays). |
-| **4** | LangChain/LangGraph toggles made real: descriptions, haptics, loop-depth control | Extends `AgentConfig`; adds a `◀ 3 ▶` stepper to `app_theme.dart` (no stepper exists yet). Must state plainly that no framework backend exists yet rather than implying an effect. |
-| **5** | Multi-step task decomposition with per-step output + consolidated result | Cloud only (refused on-device, with an in-UI explanation). Hard 5-step cap, hard token budget, confirm-before-run, running compact summary instead of resending step outputs, live cost counter, kill switch. |
+| **0** | On-device LLM produced no output | **Done, verified on device.** Not a hang — 0.43 tok/s behind a buffered API, plus no stop condition. |
+| **1** | Per-token generation visibility | **Done, verified on device.** Event stream, live status line, stop button. |
+| **2** | Multi-LLM library (adding replaced the last one) | **Done.** `lib/settings/llm_library.dart`, migration from the old single-slot settings, explicit delete. |
+| **3a** | Live CPU/RAM | **Done, verified on device.** `/proc/self` is readable on this ROM. Reported as a share of the device, not the `top`-style per-process sum. |
+| **3b-c** | Scroll to newest content | **Done.** Uniform via a single `_append` helper, not special-cased. |
+| **3d** | Collapsible folders | **Done.** The tree was already real widgets, so no rewrite was needed. |
+| **4** | LangChain / graph orchestration | **Partly done.** Both backends are real and tested; the toggles persist config but do **not** yet route generation. The cards say so. |
+| **5** | Multi-step task decomposition | **Not started.** The graph engine it depends on is built and tested (`lib/agent/graph_engine.dart`, 15 tests). |
 
-Confirmed with the user during design: one unified LLM list (on-device +
-cloud); switching unloads the old model; metrics are app-scoped; Phase 5 is
-cloud-only and conservative on cost.
+### Beyond the original plan (asked for during the work)
 
-Open items to confirm before implementation: whether the chat screen shares
-Config's `OnDeviceEngineRegistry` instance; whether the folder tree is widgets
-or flat text; whether a prior agreed value exists for Phase 4's loop levels;
-`/proc/self` readability on the physical device.
+- **Pinning** a repo, folder or file to scope the assistant, enforced app-side by
+  `applyPinnedFolder` rather than requested of the model — a 1-1.5B model ignored the
+  instruction and copied the prompt's example path verbatim.
+- **File creation** by the assistant via a fenced `create-file` block, behind an
+  editable confirm card (path and content both editable, shared path validator).
+- **New file / New folder** deterministic actions and a repo folder picker.
+- **Git action bar** in chat, costing zero prompt tokens.
+- **Check access** — a real `git-receive-pack` probe for diagnosing push failures.
+
+### Resolved during implementation
+
+- Chat and Config already share one engine via `OnDeviceEngineRegistry` — the
+  duplicate-model-load theory was wrong.
+- The folder tree was already widgets, so folding was a small change.
+- `/proc/self` is readable on this vivo ROM despite it blocking other `/proc` reads.
+- No prior agreed value for Phase 4 loop levels was found in `docs/`; a default of 5
+  (range 1-10) was chosen and is configurable via the stepper.
 
 ## Open points needing Jaya's input (raised 2026-08-25, autonomous session)
 
-### 1. Re-verify the stop-sequence fix on-device (ACTION, not a decision)
+### 1. RESOLVED — the stop-sequence fix is verified on-device
 
-**What:** The `-O3` performance fix was verified on the phone (0.43 → ~2.5
-tok/s, reply completing in 14s). The stop-sequence fix, the `Assistant:` prompt
-cue, and `nPredict` 32→256 / `nCtx` 512→2048 were committed *after* the device
-disconnected, so they are unit-tested (6 tests) but **not yet confirmed on
-hardware**.
+Confirmed on the vivo V2231: replies stop after one turn instead of the model
+role-playing a `User:` line. The `-O3` fix was verified in the same session
+(0.43 -> ~2.5 tok/s, a full reply in ~14s).
 
-**Why it matters:** the whole point of this work is that runtime behaviour is
-the evidence, not passing tests.
+### 1b. PENDING — confirm the dialog-crash fix on device
 
-**To do:** plug the phone in, `bash android/gradlew assembleDebug`, install,
-load the model, ask "hello", and confirm the reply stops after one turn instead
-of inventing a `User:` line.
+A `TextEditingController` was disposed at `Navigator.pop` while the route was
+still animating out, crashing with `'_dependents.isEmpty': is not true` on
+**new folder -> Commit & push**. Fixed by `DisposeWithRoute` (commit `fba5f2f`),
+which hands controller ownership to the route; four call sites converted, three
+widget tests that genuinely fail against the old pattern.
 
-### 2. On-device inference speed is still modest — accept or tune?
+**Not yet reproduced on device** — the phone was locked when the fix landed. The
+trigger needs the field **focused** (the cursor animation re-listens to the
+controller), so an unfocused tap will not exercise it. Worth also checking
+Config -> Add cloud LLM and Config -> Add/Edit instruction entry, since that
+fourth site was never observed crashing.
+
+### 2. On-device inference speed — accept or tune? (still open)
 
 **What:** after the `-O3` fix, gemma-3-1b-Q4 runs at ~2.5 tok/s on the vivo
 V2231. A ~30-word answer takes roughly 15–20 seconds.
@@ -129,25 +176,38 @@ No action needed unless you disagree.
 ## Open points (deferred, not blocking v1)
 
 - Full OAuth device/web flow instead of PAT.
-- LangChain/LangGraph or other agent framework integration with an on/off switch.
-- Generic git actions UI (branch, diff, merge, history) beyond commit+push of one file.
+- **Routing generation through LangChain.** The adapter is real and tested, but the
+  toggle only stores a preference today; chains/agents do not yet drive replies.
+- **Phase 5 multi-step decomposition** — cloud-only, hard 5-step cap and token budget.
+  The graph engine is built and tested; only the orchestration and UI remain.
+- Generic git UI beyond the current bar: diff, merge, history, branch switching and
+  creation, per-file staging. (Status, Log, Branches, Pull, Commit & push now exist.)
 - Multi-repo / multi-file workflows in a single session.
 - Persisting chat history across app restarts.
+- **Persisting the selected repo and pin across restarts** — today every relaunch
+  means re-selecting a repo before the git bar appears.
+- Progress readout during a slow push, and an undo for a written file.
 - Automated UI test suite (v1 relies on manual testing against a throwaway repo, plus
   one targeted unit test for the chat-instruction-to-repo-path resolver).
 
 ## Risks to watch
 
-- **BLOCKER:** the real clone/push flow (git2dart over HTTPS+PAT) against an actual
-  GitHub remote has NEVER been executed end-to-end. All git behavior is currently
-  verified only by unit tests / code review, not a live run. This must happen before
-  any real use. Running it means: a human with a real GitHub PAT and a throwaway repo
-  does the manual smoke test described in the plan's Task 8 (clone) and Task 15
-  (commit + push), confirming the repo actually clones and a real commit lands and
-  pushes to GitHub.
-- On-device gguf *loading* is now verified on the vivo V2231 (qwen2.5-0.5B-q5_K_M loads
-  in ~2.2s). Inference performance/memory after load is still unverified; the cloud path
-  should still be the one exercised first end-to-end.
+- **RESOLVED 2026-08-26 (was the long-standing BLOCKER):** the real clone/push flow
+  (git2dart over HTTPS + PAT) has now been executed end-to-end against a live GitHub
+  remote from the installed app — a file created in chat was committed and pushed to
+  `Jak2/Blog` as `99d3831`. Clone, commit and push are no longer unverified.
+- **A push 403 is almost always the token, not the app.** The first live attempt failed
+  with `GIT_ERROR_HTTP: 403`. The **Check access** chip diagnoses this definitively by
+  probing `GET /<owner>/<repo>.git/info/refs?service=git-receive-pack` (the endpoint a
+  push actually uses) with two credential formats. Note the trap it replaced: reading
+  `permissions.push` from the REST API reports the *account's* rights on the repo, not
+  the *token's*, so a fine-grained PAT with `Contents: Read-only` shows "push granted"
+  and still 403s. Never reintroduce that check.
+- On-device gguf loading **and inference** are both verified on the vivo V2231.
+  gemma-3-1b-Q4 generates at ~2.5 tok/s after the `-O3` fix (0.43 tok/s before it), so a
+  sentence takes 10-20s. Usable, and the streaming UI makes the wait legible, but the
+  cloud path remains the faster one. **Debug APKs must keep the `-O3` flag from
+  `scripts/setup_llama_cpp_dart.sh`** or inference silently returns to unusable.
 - **On-device load requires a one-time per-machine setup step**:
   `bash scripts/setup_llama_cpp_dart.sh`, then a clean native rebuild. It pins
   `llama.cpp` to `ab1401982` and patches two `llama_cpp_dart` bugs. Skipping it, or
